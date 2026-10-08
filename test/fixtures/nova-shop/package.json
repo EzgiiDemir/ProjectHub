@@ -1,0 +1,15 @@
+{
+  "name": "nova-magaza",
+  "version": "1.2.0",
+  "description": "Nova Perakende için vitrin, sepet ve ödeme akışı.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node server.mjs",
+    "test": "node --test"
+  }
+}

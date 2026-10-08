@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sepet — Nova Mağaza</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header><a class="logo" href="/">Nova Market</a><nav><a href="/">Ana sayfa</a><a href="/products/14">Ürünler</a><a href="/checkout">Sepet</a></nav></header>
+  <div class="wrap">
+    <h2>Sepetim</h2>
+    <div class="row"><span>Seramik kupa × 2</span><b>418 ₺</b></div>
+    <div class="row"><span>Kargo</span><b>0 ₺</b></div>
+    <div class="row"><span>Toplam</span><b id="total">418 ₺</b></div>
+    <button class="btn checkout" id="checkout-button">Ödemeye geç</button>
+    <p class="policy">İade politikası: Ürünler 14 gün içinde iade edilebilir.</p>
+  </div>
+  <script>
+    fetch('/api/cart').then((r) => r.json()).then((c) => { document.getElementById('total').textContent = c.total + ' ₺'; });
+  </script>
+</body>
+</html>
