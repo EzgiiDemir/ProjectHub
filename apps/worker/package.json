@@ -27,6 +27,7 @@
     "@types/pg": "^8.15.6",
     "@types/pngjs": "^6.0.5",
     "@types/ssh2": "^1.15.6",
-    "@types/ssh2-sftp-client": "^9.0.6"
+    "@types/ssh2-sftp-client": "^9.0.6",
+    "ftp-srv": "^4.6.3"
   }
 }

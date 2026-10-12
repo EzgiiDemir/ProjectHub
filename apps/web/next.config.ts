@@ -5,6 +5,11 @@ const api = process.env.API_INTERNAL_URL ?? 'http://127.0.0.1:4000';
 const nextConfig: NextConfig = {
   output: 'standalone',
   reactStrictMode: true,
+  experimental: {
+    // proxy.ts makes Next buffer request bodies (default cap 10 MB). Project imports upload up to 300 MB
+    // (API limit) through the /api rewrite in development; in production the reverse proxy bypasses Next.
+    proxyClientMaxBodySize: '310mb',
+  },
   poweredByHeader: false,
   transpilePackages: ['@projecthub/contracts'],
   // The browser talks to one origin; API and Git traffic are forwarded to the API service.

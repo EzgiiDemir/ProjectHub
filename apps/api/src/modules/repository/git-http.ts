@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import type { NextFunction, Request, Response } from 'express';
 import type { INestApplication } from '@nestjs/common';
-import { GitRepository, type Actor } from '@projecthub/core';
+import { branchProtectionOf, GitRepository, type Actor } from '@projecthub/core';
 import { AuthGuard } from '../../infra/auth.guard.js';
 import { Ctx, clientIp } from '../../infra/context.js';
 import { ProjectAccess } from '../../infra/project-access.js';
@@ -47,7 +47,9 @@ export function gitHttpMiddleware(app: INestApplication) {
       }
       const { git, repo } = await repos.forProject(projectId);
       const before = isPush ? await git.refSnapshot() : null;
-      await runHttpBackend(ctx.config.GIT_BINARY, path.dirname(git.dir), req, res, m[2]!, auth.user.email);
+      if (isPush) await git.ensureProtectionHook();
+      const protectedRefs = isPush ? branchProtectionOf(scope.project.settings).branches.join(' ') : '';
+      await runHttpBackend(ctx.config.GIT_BINARY, path.dirname(git.dir), req, res, m[2]!, auth.user.email, protectedRefs);
       if (isPush && before && req.path.endsWith('/git-receive-pack')) {
         const after = await git.refSnapshot();
         const actor: Actor = { type: 'user', id: auth.user.id, label: auth.user.displayName, ip: clientIp(req), userAgent: String(req.headers['user-agent'] ?? '') };
@@ -66,7 +68,7 @@ export function gitHttpMiddleware(app: INestApplication) {
   };
 }
 
-function runHttpBackend(gitBinary: string, root: string, req: Request, res: Response, pathInfoSuffix: string, user: string): Promise<void> {
+function runHttpBackend(gitBinary: string, root: string, req: Request, res: Response, pathInfoSuffix: string, user: string, protectedRefs = ''): Promise<void> {
   return new Promise((resolve, reject) => {
     const repoName = path.basename(req.path.split('.git')[0]!) + '.git';
     const env: NodeJS.ProcessEnv = {
@@ -80,6 +82,8 @@ function runHttpBackend(gitBinary: string, root: string, req: Request, res: Resp
       REMOTE_USER: user,
       REMOTE_ADDR: clientIp(req) ?? '',
       GIT_HTTP_MAX_REQUEST_BUFFER: '100M',
+      // Read by the pre-receive hook (branch protection).
+      PH_PROTECTED_REFS: protectedRefs,
     };
     if (req.headers['content-encoding']) env.HTTP_CONTENT_ENCODING = String(req.headers['content-encoding']);
     if (req.headers['git-protocol']) env.GIT_PROTOCOL = String(req.headers['git-protocol']);

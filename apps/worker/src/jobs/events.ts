@@ -29,10 +29,28 @@ interface Rule {
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
 
 const RULES: Partial<Record<DomainEvent, Rule>> = {
+  'pull_request.opened': {
+    category: 'code',
+    permission: 'repository.push',
+    title: (e, p) => `${p}: PR #${String(e.payload.number)} incelemenizi bekliyor — ${str(e.payload.title)}`,
+    link: (e, s) => `/projects/${s}/pull-requests/${String(e.payload.number)}`,
+  },
+  'pull_request.reviewed': {
+    category: 'code',
+    userFields: ['authorId'],
+    title: (e, p) => `${p}: PR #${String(e.payload.number)} ${e.payload.decision === 'approved' ? 'onaylandı' : 'için değişiklik istendi'}`,
+    link: (e, s) => `/projects/${s}/pull-requests/${String(e.payload.number)}`,
+  },
+  'pull_request.merged': {
+    category: 'code',
+    userFields: ['authorId'],
+    title: (e, p) => `${p}: PR #${String(e.payload.number)} birleştirildi — ${str(e.payload.title)}`,
+    link: (e, s) => `/projects/${s}/pull-requests/${String(e.payload.number)}`,
+  },
   'feedback.created': {
     category: 'feedback',
     permission: 'feedback.manage',
-    title: (e, p) => `${p}: yeni müşteri geri bildirimi — ${str(e.payload.title)}`,
+    title: (e, p) => `${p}: yeni kullanıcı geri bildirimi — ${str(e.payload.title)}`,
     link: (e, s) => `/projects/${s}/feedback/${str(e.payload.feedbackId)}`,
   },
   'build.failed': {
@@ -101,13 +119,33 @@ const RULES: Partial<Record<DomainEvent, Rule>> = {
     permission: 'environment.manage',
     email: true,
     title: (e, p) => `${p}: olay açıldı — ${str(e.payload.title)}`,
-    link: (e, s) => `/projects/${s}/incidents/${str(e.payload.incidentId)}`,
+    link: (e, s) => `/projects/${s}/incidents?open=${str(e.payload.incidentId)}`,
   },
   'incident.resolved': {
     category: 'incident',
     permission: 'environment.manage',
     title: (e, p) => `${p}: olay çözüldü — ${str(e.payload.title)}`,
-    link: (e, s) => `/projects/${s}/incidents/${str(e.payload.incidentId)}`,
+    link: (e, s) => `/projects/${s}/incidents?open=${str(e.payload.incidentId)}`,
+  },
+  'task.assigned': {
+    category: 'team',
+    userFields: ['assigneeId'],
+    email: true,
+    title: (e, p) => `${p}: ${str(e.payload.key)} size atandı — ${str(e.payload.title)}`,
+    link: (e) => `/team?task=${str(e.payload.taskId)}`,
+  },
+  'task.commented': {
+    category: 'team',
+    userFields: ['userId'],
+    title: (e, p) => `${p}: ${str(e.payload.key)} yorumlandı — ${str(e.payload.title)}`,
+    link: (e) => `/team?task=${str(e.payload.taskId)}`,
+  },
+  'project.mentioned': {
+    category: 'team',
+    userFields: ['userId'],
+    email: true,
+    title: (e, p) => `${p} tartışmasında sizden bahsedildi: “${str(e.payload.excerpt)}”`,
+    link: (_e, s) => `/projects/${s}/discussion`,
   },
 };
 
@@ -147,7 +185,10 @@ export async function dispatchEvent(ctx: WorkerCtx, { job }: JobContext) {
   }
   if (e.actor?.type === 'user' && e.actor.id) recipients.delete(e.actor.id);
   if (!recipients.size) return { webhooks: hooks.length, notified: 0 };
-  const active = await db.select({ id: users.id, email: users.email }).from(users).where(and(inArray(users.id, [...recipients]), eq(users.status, 'active')));
+  const people = await db.select({ id: users.id, email: users.email, prefs: users.notificationPreferences }).from(users).where(and(inArray(users.id, [...recipients]), eq(users.status, 'active')));
+  // Per-user preferences (Hesabım > Bildirimler): in-app defaults to on, e-mail to the rule's default.
+  const active = people.filter((u) => u.prefs[rule.category]?.inApp ?? true);
+  const emailTo = people.filter((u) => u.prefs[rule.category]?.email ?? rule.email ?? false);
   const title = rule.title(e, project.name).slice(0, 300);
   const link = rule.link(e, project.slug);
   const body = e.actor ? `${e.actor.label}` : '';
@@ -155,9 +196,9 @@ export async function dispatchEvent(ctx: WorkerCtx, { job }: JobContext) {
     await db.insert(notifications).values(active.map((u) => ({ organizationId: e.organizationId, userId: u.id, projectId: e.projectId, category: rule.category, title, body, link })));
     for (const u of active) await publish(db, { type: 'notification', organizationId: e.organizationId, data: { userId: u.id, title } });
   }
-  const t = rule.email ? mailer(ctx) : null;
+  const t = emailTo.length ? mailer(ctx) : null;
   if (t) {
-    for (const u of active) {
+    for (const u of emailTo) {
       try {
         await t.sendMail({ from: ctx.config.SMTP_FROM, to: u.email, subject: title, text: `${title}\n\n${ctx.config.APP_URL}${link}\n` });
       } catch (err) {

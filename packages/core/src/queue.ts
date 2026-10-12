@@ -73,6 +73,20 @@ export class PermanentJobError extends Error {
   }
 }
 
+/**
+ * Throw when a job cannot start yet because of a capacity limit (e.g. the organization's concurrent-build cap).
+ * The job goes back to the queue after `delayMs` without consuming an attempt.
+ */
+export class DeferJobError extends Error {
+  constructor(
+    message: string,
+    readonly delayMs = 15_000,
+  ) {
+    super(message);
+    this.name = 'DeferJobError';
+  }
+}
+
 export function newWorkerId(): string {
   return `${os.hostname()}:${process.pid}:${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -235,6 +249,14 @@ export class JobRunner {
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       if (this.stopping && controller.signal.aborted) return; // lease released in stop()
+      if (err instanceof DeferJobError) {
+        logger.debug({ retryInMs: err.delayMs }, err.message);
+        await this.deps.db
+          .update(jobs)
+          .set({ status: 'queued', attempts: sql`greatest(${jobs.attempts} - 1, 0)`, lastError: err.message.slice(0, 4000), runAt: new Date(Date.now() + err.delayMs), lockedBy: null, lockedUntil: null })
+          .where(eq(jobs.id, job.id));
+        return;
+      }
       const permanent = err instanceof PermanentJobError || job.attempts >= job.maxAttempts;
       if (permanent) {
         logger.error({ err }, 'job failed permanently');

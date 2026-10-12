@@ -69,7 +69,8 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     logger.info({ signal }, 'worker shutting down');
     clearInterval(hb);
     clearInterval(sched);
-    await runner.stop(25_000);
+    // Fits the container stop grace period (deploy/compose.yaml: 60 s); unfinished jobs are re-queued.
+    await runner.stop(50_000);
     await onWorkerStop(ctx);
     await handle.db.execute(sql`DELETE FROM worker_heartbeats WHERE worker_id = ${runner.workerId}`).catch(() => undefined);
     await handle.close();

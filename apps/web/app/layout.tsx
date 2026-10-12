@@ -10,7 +10,7 @@ const serif = Source_Serif_4({ subsets: ['latin', 'latin-ext'], weight: ['400', 
 
 export const metadata: Metadata = {
   title: { default: 'Project Hub', template: '%s · Project Hub' },
-  description: 'Şirket projelerinin merkezi yönetimi: kaynak kod, build, ön izleme, müşteri incelemesi, deployment, güvenlik ve AI.',
+  description: 'Şirket projelerinin merkezi yönetimi: kaynak kod, build, ön izleme, kullanıcı incelemesi, deployment, güvenlik ve AI.',
   robots: { index: false, follow: false },
 };
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { GitBranchPlus, GitMerge, Trash2 } from 'lucide-react';
+import { GitBranchPlus, GitMerge, GitPullRequestArrow, Shield, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useState } from 'react';
@@ -69,6 +69,9 @@ function BranchList({ slug, data, canPush, onCompare, onHistory }: { slug: strin
   const toast = useToast();
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const project = useProject().data;
+  const canManage = !!project?.permissions.includes('project.update') && project.status !== 'archived';
+  const protectedBranches = useProtection();
   const del = useMutation({
     mutationFn: (name: string) => api(`/projects/${slug}/repo/branches?name=${encodeURIComponent(name)}`, { method: 'DELETE' }),
     onSuccess: () => {
@@ -103,6 +106,7 @@ function BranchList({ slug, data, canPush, onCompare, onHistory }: { slug: strin
                 <tr key={b.name}>
                   <td>
                     <span className="tag">{b.name}</span> {b.isDefault && <span className="small muted">varsayılan</span>}
+                    {protectedBranches.includes(b.name) && <span className="small muted"> · 🔒 korumalı</span>}
                     {b.name.startsWith('ai/') && <span className="small muted"> · AI görevi</span>}
                   </td>
                   <td style={{ maxWidth: 380 }}>
@@ -126,7 +130,7 @@ function BranchList({ slug, data, canPush, onCompare, onHistory }: { slug: strin
                         Karşılaştır
                       </button>
                     )}
-                    {canPush && !b.isDefault && (
+                    {canPush && !b.isDefault && !protectedBranches.includes(b.name) && (
                       <button className="btn sm ghost" title="Sil" onClick={() => setDeleting(b.name)}>
                         <Trash2 size={14} />
                       </button>
@@ -149,6 +153,7 @@ function BranchList({ slug, data, canPush, onCompare, onHistory }: { slug: strin
           </div>
         </Panel>
       )}
+      {canManage && <ProtectionPanel slug={slug} data={data} />}
       {creating && <CreateBranch slug={slug} data={data} onClose={() => setCreating(false)} />}
       {deleting && (
         <ConfirmDialog
@@ -294,6 +299,7 @@ function Compare({ slug, data, base, head, canPush, onChange, onOpen }: { slug: 
     },
   });
   const isAi = head.startsWith('ai/');
+  const protectedBranches = useProtection();
   return (
     <>
       <div className="row" style={{ marginBottom: 12 }}>
@@ -310,8 +316,13 @@ function Compare({ slug, data, base, head, canPush, onChange, onOpen }: { slug: 
         </select>
         <div style={{ flex: 1 }} />
         {canPush && q.data && q.data.ahead > 0 && !isAi && (
-          <button className="btn pri" onClick={() => setMerging(true)}>
-            <GitMerge /> {head} → {base} birleştir
+          <Link className="btn pri" href={`/projects/${slug}/pull-requests?new=1&source=${encodeURIComponent(head)}&target=${encodeURIComponent(base)}`}>
+            <GitPullRequestArrow /> Pull request aç
+          </Link>
+        )}
+        {canPush && q.data && q.data.ahead > 0 && !isAi && !protectedBranches.includes(base) && (
+          <button className="btn" onClick={() => setMerging(true)}>
+            <GitMerge /> Doğrudan birleştir
           </button>
         )}
       </div>
@@ -398,5 +409,63 @@ function CommitDrawer({ slug, sha, onClose }: { slug: string; sha: string; onClo
         )}
       </Async>
     </Drawer>
+  );
+}
+
+/** Protected branch names from the project's settings (branch protection). */
+function useProtection(): string[] {
+  const p = useProject().data;
+  return ((p?.settings as { protection?: { branches?: string[] } } | undefined)?.protection?.branches ?? []) as string[];
+}
+
+/** Project admins choose which branches only change through reviewed pull requests. */
+function ProtectionPanel({ slug, data }: { slug: string; data: Branches }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const project = useProject().data;
+  const current = (project?.settings as { protection?: { branches: string[]; requiredApprovals: number; requirePassingBuild: boolean } } | undefined)?.protection;
+  const [v, setV] = useState({ branches: current?.branches ?? [], requiredApprovals: current?.requiredApprovals ?? 1, requirePassingBuild: current?.requirePassingBuild ?? true });
+  const save = useMutation({
+    mutationFn: () => api(`/projects/${slug}/branch-protection`, { method: 'PUT', body: v }),
+    onSuccess: () => {
+      toast('Branch koruması kaydedildi');
+      void qc.invalidateQueries({ queryKey: ['project', slug] });
+    },
+    onError: (e) => toast(errorMessage(e), 'bad'),
+  });
+  return (
+    <Panel title={<span className="row" style={{ gap: 6 }}><Shield size={16} /> Branch koruması</span>} className="mt">
+      <p className="small muted" style={{ marginTop: 0 }}>
+        Korumalı branch&apos;lere doğrudan commit, git push, doğrudan birleştirme ve silme yapılamaz; değişiklikler onaylı pull request ile gelir. AI görevleri kendi onay akışıyla birleşir.
+      </p>
+      <div className="row" style={{ marginBottom: 8 }}>
+        {data.branches
+          .filter((b) => !b.name.startsWith('ai/'))
+          .map((b) => (
+            <label key={b.name} className="check">
+              <input type="checkbox" checked={v.branches.includes(b.name)} onChange={(e) => setV((x) => ({ ...x, branches: e.target.checked ? [...x.branches, b.name] : x.branches.filter((n) => n !== b.name) }))} />
+              <span className="tag">{b.name}</span>
+            </label>
+          ))}
+      </div>
+      <div className="row">
+        <label className="small">
+          Gerekli onay{' '}
+          <select className="in" style={{ width: 'auto' }} value={v.requiredApprovals} onChange={(e) => setV((x) => ({ ...x, requiredApprovals: Number(e.target.value) }))}>
+            {[0, 1, 2, 3].map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="check small">
+          <input type="checkbox" checked={v.requirePassingBuild} onChange={(e) => setV((x) => ({ ...x, requirePassingBuild: e.target.checked }))} /> Başarılı build zorunlu
+        </label>
+        <button className="btn pri" onClick={() => save.mutate()} disabled={save.isPending}>
+          Kaydet
+        </button>
+      </div>
+    </Panel>
   );
 }

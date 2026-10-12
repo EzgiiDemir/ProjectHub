@@ -23,6 +23,7 @@ import {
   organizationMembers,
   reviewSessions,
   reviewVisitors,
+  taskEvents,
   tasks,
   users,
   type Executor,
@@ -342,24 +343,61 @@ export class FeedbackService {
     return rows.map((t) => ({ ...t, key: `PH-${t.number}`, assignee: t.assigneeId ? { id: t.assigneeId, ...(names.get(t.assigneeId) ?? { displayName: '—', avatarColor: '#888' }) } : null }));
   }
 
-  async createTask(auth: AuthInfo, idOrSlug: string, input: { title: string; description: string; priority: Priority; assigneeId: string | null }, actor: Actor) {
+  async createTask(
+    auth: AuthInfo,
+    idOrSlug: string,
+    input: { title: string; description: string; priority: Priority; assigneeId: string | null; dueDate?: string | null; labels?: string[] },
+    actor: Actor,
+  ) {
     const scope = await this.access.requireWritable(auth, idOrSlug, 'feedback.manage');
+    if (input.assigneeId) await this.assertAssignable(auth, scope.project.id, input.assigneeId);
     const t = await this.ctx.db.transaction(async (tx) => {
       const number = await nextNumber(tx, auth.organizationId, 'task');
       const row = (await tx.insert(tasks).values({ organizationId: auth.organizationId, projectId: scope.project.id, number, ...input, sourceType: 'manual', createdBy: auth.user.id }).returning())[0]!;
+      await tx.insert(taskEvents).values({ organizationId: auth.organizationId, taskId: row.id, actorId: auth.user.id, actorLabel: actor.label, kind: 'created', toValue: row.status });
+      if (row.assigneeId) {
+        await tx.insert(taskEvents).values({ organizationId: auth.organizationId, taskId: row.id, actorId: auth.user.id, actorLabel: actor.label, kind: 'assigned', toValue: row.assigneeId });
+        await emitDomainEvent(tx, { event: 'task.assigned', organizationId: auth.organizationId, projectId: scope.project.id, actor, data: { taskId: row.id, key: `PH-${number}`, title: row.title, assigneeId: row.assigneeId } });
+      }
       await audit(tx, { organizationId: auth.organizationId, projectId: scope.project.id, actor, action: 'task.created', resourceType: 'task', resourceId: row.id });
       await timeline(tx, { organizationId: auth.organizationId, projectId: scope.project.id, kind: 'task', title: `Görev PH-${number}: ${row.title}`, actorLabel: actor.label, refType: 'task', refId: row.id });
+      await publish(tx, { type: 'task.updated', organizationId: auth.organizationId, projectId: scope.project.id, id: row.id });
       return row;
     });
     return { ...t, key: `PH-${t.number}` };
   }
 
-  async updateTask(auth: AuthInfo, taskId: string, input: { title?: string; description?: string; status?: TaskStatus; priority?: Priority; assigneeId?: string | null; branch?: string | null }, actor: Actor) {
+  /** Tasks can only be assigned to active people who can see the project. */
+  private async assertAssignable(auth: AuthInfo, projectId: string, userId: string) {
+    const ok = await this.access.userCanSee(auth.organizationId, projectId, userId);
+    if (!ok) throw invalid('Görev yalnızca projeye erişimi olan aktif bir kişiye atanabilir');
+  }
+
+  async updateTask(
+    auth: AuthInfo,
+    taskId: string,
+    input: { title?: string; description?: string; status?: TaskStatus; priority?: Priority; assigneeId?: string | null; branch?: string | null; dueDate?: string | null; labels?: string[] },
+    actor: Actor,
+  ) {
     const t = (await this.ctx.db.select().from(tasks).where(and(eq(tasks.id, taskId), eq(tasks.organizationId, auth.organizationId))))[0];
     if (!t) throw notFound('Görev');
     await this.access.requireWritable(auth, t.projectId, 'feedback.manage');
+    if (input.assigneeId && input.assigneeId !== t.assigneeId) await this.assertAssignable(auth, t.projectId, input.assigneeId);
     const row = await this.ctx.db.transaction(async (tx) => {
       const r = (await tx.update(tasks).set({ ...input, completedAt: input.status === 'done' ? new Date() : input.status ? null : t.completedAt }).where(eq(tasks.id, t.id)).returning())[0]!;
+      // Task history for the board's timeline.
+      const ev = (kind: 'status' | 'assigned' | 'due' | 'priority' | 'edited', fromValue: string | null, toValue: string | null) =>
+        tx.insert(taskEvents).values({ organizationId: auth.organizationId, taskId: t.id, actorId: auth.user.id, actorLabel: actor.label, kind, fromValue, toValue });
+      if (input.status && input.status !== t.status) await ev('status', t.status, input.status);
+      if (input.assigneeId !== undefined && input.assigneeId !== t.assigneeId) {
+        await ev('assigned', t.assigneeId, input.assigneeId);
+        if (input.assigneeId && input.assigneeId !== auth.user.id) {
+          await emitDomainEvent(tx, { event: 'task.assigned', organizationId: auth.organizationId, projectId: t.projectId, actor, data: { taskId: t.id, key: `PH-${t.number}`, title: r.title, assigneeId: input.assigneeId } });
+        }
+      }
+      if (input.dueDate !== undefined && input.dueDate !== t.dueDate) await ev('due', t.dueDate, input.dueDate);
+      if (input.priority && input.priority !== t.priority) await ev('priority', t.priority, input.priority);
+      if ((input.title !== undefined && input.title !== t.title) || (input.description !== undefined && input.description !== t.description)) await ev('edited', null, null);
       // Keep the source feedback in step with its task.
       if (input.status && t.sourceType === 'feedback' && t.sourceId) {
         const next: FeedbackStatus | null = input.status === 'in_progress' ? 'in_progress' : input.status === 'in_review' ? 'ready_for_review' : null;

@@ -29,6 +29,8 @@ export function citationHref(slug: string, c: Citation): string {
       return `${base}/feedback/${c.ref}`;
     case 'finding':
       return `${base}/security?finding=${c.ref}`;
+    case 'memory':
+      return `${base}/ai?tab=memory&memory=${c.ref}`;
     default:
       return base;
   }
@@ -85,7 +87,9 @@ export function AiChat({
     conversation.current = initialConversation ?? null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialConversation]);
-  useEffect(() => end.current?.scrollIntoView({ block: 'end' }), [turns]);
+  useEffect(() => {
+    void end.current?.scrollIntoView({ block: 'end' });
+  }, [turns]);
   useEffect(() => () => abort.current?.abort(), []);
 
   const ask = async (message: string) => {

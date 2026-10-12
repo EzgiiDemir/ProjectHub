@@ -86,6 +86,10 @@ export class UploadsService {
       };
     } catch (e) {
       await this.ctx.storage.remove(dirKey).catch(() => undefined);
+      const err = e as NodeJS.ErrnoException;
+      if (err.code === 'ECONNRESET' || err.code === 'ERR_STREAM_PREMATURE_CLOSE' || err.message === 'aborted') {
+        throw new AppError('VALIDATION_ERROR', 'Yükleme yarıda kesildi; bağlantıyı kontrol edip tekrar deneyin.');
+      }
       throw e;
     }
   }

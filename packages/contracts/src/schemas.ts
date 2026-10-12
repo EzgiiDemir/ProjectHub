@@ -8,6 +8,8 @@ import {
   FEEDBACK_STATUSES,
   FEEDBACK_TYPES,
   FINDING_STATUSES,
+  NOTIFICATION_CATEGORIES,
+  PROJECT_TEMPLATE_IDS,
   PRIORITIES,
   PROJECT_STATUSES,
   SECRET_KINDS,
@@ -19,12 +21,15 @@ import { ALL_PERMISSIONS, type Permission } from './permissions.js';
 const uuid = z.uuid();
 const trimmed = (max: number) => z.string().trim().max(max);
 const required = (max: number) => z.string().trim().min(1, 'Zorunlu alan').max(max);
+/** Slugs that collide with fixed web routes (e.g. /projects/new). */
+const RESERVED_SLUGS = new Set(['new', 'archive', 'admin', 'api', 'git']);
 export const slugSchema = z
   .string()
   .trim()
   .min(2)
   .max(80)
-  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Yalnızca küçük harf, rakam ve tire kullanılabilir');
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Yalnızca küçük harf, rakam ve tire kullanılabilir')
+  .refine((s) => !RESERVED_SLUGS.has(s), 'Bu kısa ad sistem tarafından kullanılıyor');
 export const branchNameSchema = z
   .string()
   .trim()
@@ -89,7 +94,7 @@ export const createProjectSchema = z.object({
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   defaultBranch: branchNameSchema.default('main'),
   source: z.discriminatedUnion('type', [
-    z.object({ type: z.literal('empty') }),
+    z.object({ type: z.literal('empty'), template: z.enum(PROJECT_TEMPLATE_IDS).optional() }),
     z.object({
       type: z.literal('git'),
       url: z.url().max(500),
@@ -109,6 +114,8 @@ export const updateProjectSchema = z.object({
   teamId: uuid.nullable().optional(),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   status: z.enum(PROJECT_STATUSES).exclude(['archived']).optional(),
+  /** Explicit operator decision required before commands from imported repositories can run on the worker host. */
+  executionTrust: z.enum(['trusted', 'untrusted']).optional(),
 });
 export const projectListQuerySchema = z.object({
   status: z.enum([...PROJECT_STATUSES, 'all']).default('all'),
@@ -222,11 +229,15 @@ export const feedbackToTaskSchema = z.object({
   hotfix: z.boolean().default(false),
 });
 
+const dueDate = z.iso.date('Tarih YYYY-AA-GG biçiminde olmalı');
+const taskLabels = z.array(z.string().trim().min(1).max(30)).max(10);
 export const createTaskSchema = z.object({
   title: required(200),
   description: trimmed(10000).default(''),
   priority: z.enum(PRIORITIES).default('medium'),
   assigneeId: uuid.nullable().default(null),
+  dueDate: dueDate.nullable().default(null),
+  labels: taskLabels.default([]),
 });
 export const updateTaskSchema = z.object({
   title: required(200).optional(),
@@ -235,7 +246,11 @@ export const updateTaskSchema = z.object({
   priority: z.enum(PRIORITIES).optional(),
   assigneeId: uuid.nullable().optional(),
   branch: branchNameSchema.nullable().optional(),
+  dueDate: dueDate.nullable().optional(),
+  labels: taskLabels.optional(),
 });
+export const commentSchema = z.object({ body: required(5000) });
+export const projectCommentSchema = z.object({ body: required(5000), parentId: uuid.optional(), mentions: z.array(uuid).max(20).default([]) });
 
 /* ---------------- environments / deploy ---------------- */
 export const upsertEnvironmentSchema = z.object({
@@ -309,6 +324,17 @@ export const aiQuerySchema = z.object({
 });
 export const aiFixSchema = z.object({ instruction: trimmed(4000).optional() });
 export const aiDecisionSchema = z.object({ comment: trimmed(2000).optional() });
+export const AI_MEMORY_CATEGORIES = ['architecture', 'decision', 'convention', 'bug', 'task_outcome', 'fact'] as const;
+export const AI_MEMORY_VERIFICATIONS = ['verified', 'inferred', 'historical'] as const;
+export const aiMemoryCreateSchema = z.object({
+  category: z.enum(AI_MEMORY_CATEGORIES),
+  title: required(200),
+  content: required(20000),
+  verification: z.enum(AI_MEMORY_VERIFICATIONS).default('verified'),
+  sourceLabel: trimmed(300).optional(),
+});
+export const aiMemoryUpdateSchema = aiMemoryCreateSchema.partial().refine((value) => Object.keys(value).length > 0, 'En az bir alan değişmeli');
+export type AiMemoryInput = z.infer<typeof aiMemoryCreateSchema>;
 export const aiSettingsSchema = z.object({
   provider: z.enum(AI_PROVIDERS).nullable(),
   model: trimmed(100).nullable(),
@@ -320,6 +346,12 @@ export const aiSettingsSchema = z.object({
     commitToAiBranch: z.boolean(),
     runBuilds: z.boolean(),
     createPreview: z.boolean(),
+  }),
+  selfHealing: z.object({
+    enabled: z.boolean(),
+    emergencyStop: z.boolean(),
+    autoRecheckHealth: z.boolean(),
+    maxAttemptsPerHour: z.number().int().min(1).max(10),
   }),
 });
 export type AiSettings = z.infer<typeof aiSettingsSchema>;
@@ -351,3 +383,62 @@ export const auditQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 export const searchQuerySchema = z.object({ q: required(200), limit: z.coerce.number().int().min(1).max(50).default(20) });
+
+/* ---------------- pull requests / branch protection ---------------- */
+export const branchProtectionSchema = z.object({
+  /** Branches that only change through pull requests (pushes, web edits and direct merges are refused). */
+  branches: z.array(branchNameSchema).max(20).default([]),
+  requiredApprovals: z.number().int().min(0).max(5).default(1),
+  requirePassingBuild: z.boolean().default(true),
+});
+export type BranchProtection = z.infer<typeof branchProtectionSchema>;
+export const createPullRequestSchema = z.object({
+  title: required(200),
+  description: trimmed(20000).default(''),
+  sourceBranch: branchNameSchema,
+  targetBranch: branchNameSchema,
+});
+export const updatePullRequestSchema = z.object({ title: required(200).optional(), description: trimmed(20000).optional() });
+export const pullRequestReviewSchema = z.object({ decision: z.enum(['approved', 'changes_requested']), body: trimmed(5000).default('') });
+export const pullRequestCommentSchema = z.object({ body: required(5000), path: trimmed(500).optional(), line: z.number().int().min(1).optional() });
+export const mergePullRequestSchema = z.object({ message: trimmed(500).optional(), deleteSourceBranch: z.boolean().default(false) });
+const clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Saat SS:DD biçiminde olmalı');
+/** Spec §25/§106 example: "after 22:00 a deployment needs a manager's approval". Days: 0 = Pazar … 6 = Cumartesi. */
+export const deploymentWindowSchema = z
+  .object({
+    enabled: z.boolean(),
+    environmentTypes: z.array(z.enum(ENVIRONMENT_TYPES)).min(1).max(4).default(['production']),
+    days: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+    start: clock,
+    end: clock,
+    timezone: z.string().trim().min(1).max(64).refine((tz) => {
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: tz });
+        return true;
+      } catch {
+        return false;
+      }
+    }, 'Geçersiz saat dilimi'),
+    outside: z.enum(['require_approval', 'deny']),
+  })
+  .refine((w) => w.start !== w.end, { message: 'Başlangıç ve bitiş saati aynı olamaz', path: ['end'] });
+export type DeploymentWindow = z.infer<typeof deploymentWindowSchema>;
+
+/** Customer portal branding (spec §141). Raster logos only (SVG can carry scripts), ≤ 200 KB as a data URL. */
+const logoDataUrl = z
+  .string()
+  .max(280_000, 'Logo en fazla 200 KB olabilir')
+  .regex(/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+=*$/, 'Logo PNG, JPEG veya WebP olmalı');
+export const organizationBrandingSchema = z.object({ logo: logoDataUrl.nullable() });
+export const projectBrandingSchema = z.object({
+  logo: logoDataUrl.nullable(),
+  customerLogo: logoDataUrl.nullable(),
+  accent: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Renk #RRGGBB biçiminde olmalı').nullable(),
+});
+export type ProjectBranding = z.infer<typeof projectBrandingSchema>;
+
+/** Per category: in-app on/off (default on) and e-mail on/off (omitted = the event's own default). */
+export const notificationPreferencesSchema = z.partialRecord(
+  z.enum(NOTIFICATION_CATEGORIES),
+  z.object({ inApp: z.boolean().optional(), email: z.boolean().optional() }),
+);

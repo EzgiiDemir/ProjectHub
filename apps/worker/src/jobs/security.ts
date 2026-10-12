@@ -47,7 +47,11 @@ export async function runSecurityScan(ctx: WorkerCtx, p: ScanPayload, logger: Lo
     const opts = { secretScan: manifest?.security.secretScan ?? true, dependencyScan: manifest?.security.dependencyScan ?? true };
     const snap = await commitSnapshot(git, commit);
     await snap.preload(snap.entries.filter((f) => scan.isScannable(f.path, f.size) || /(^|\/)(Dockerfile[^/]*|\.gitignore|\.env(\.[a-z]+)?)$/i.test(f.path)).map((f) => f.path));
-    const result = await scan.scanRepository(snap, { ...opts, osvUrl: ctx.config.OSV_API_URL, checkOutdated: true });
+    const result = await scan.scanRepository(snap, {
+      ...opts,
+      osvUrl: ctx.config.OSV_API_URL,
+      registries: { npm: ctx.config.NPM_REGISTRY_URL, pypi: ctx.config.PYPI_URL, packagist: ctx.config.PACKAGIST_URL },
+    });
     const dependencyCovered = opts.dependencyScan && !result.notes.some((n) => n.includes('ulaşılamadı') || n.includes('kapalı'));
     const covered: FindingType[] = ['code', 'config', ...(opts.secretScan ? (['secret'] as const) : []), ...(dependencyCovered ? (['dependency'] as const) : [])];
 
@@ -119,7 +123,11 @@ export async function runSecurityScan(ctx: WorkerCtx, p: ScanPayload, logger: Lo
           summary: { ...tally, byType, packagesScanned: result.packagesScanned, filesScanned: result.filesScanned, breakdown, notes: result.notes },
         })
         .where(eq(securityScans.id, scanId!));
-      await tx.update(projects).set({ securityScore: score }).where(eq(projects.id, project.id));
+      const dependencyInventory = result.dependencies.filter((item) => item.direct).slice(0, 1000);
+      await tx
+        .update(projects)
+        .set({ securityScore: score, settings: sql`jsonb_set(${projects.settings}, '{dependencyInventory}', ${JSON.stringify(dependencyInventory)}::jsonb, true)` })
+        .where(eq(projects.id, project.id));
       await audit(tx, { organizationId: project.organizationId, projectId: project.id, actor: SYSTEM_ACTOR, action: 'security.scan_completed', resourceType: 'security_scan', resourceId: scanId!, metadata: { score, ...tally } });
       await timeline(tx, {
         organizationId: project.organizationId,

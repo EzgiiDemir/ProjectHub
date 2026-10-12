@@ -8,6 +8,7 @@ import {
   databaseConnectionSchema,
   deploymentDecisionSchema,
   deploymentTargetSchema,
+  deploymentWindowSchema,
   updateFindingSchema,
   upsertEnvironmentSchema,
   upsertSecretSchema,
@@ -16,6 +17,7 @@ import { notFound, type Actor } from '@projecthub/core';
 import type { AuthInfo } from '../../infra/context.js';
 import { assertUuid, Auth, CurrentActor, parse } from '../../infra/http.js';
 import { SecurityService } from '../security/security.service.js';
+import { DatabaseOpsService } from './database-ops.service.js';
 import { DeployService } from './deploy.service.js';
 
 @Controller()
@@ -23,7 +25,66 @@ export class DeployController {
   constructor(
     private readonly deploy: DeployService,
     private readonly security: SecurityService,
+    private readonly dbOps: DatabaseOpsService,
   ) {}
+
+  /* database safety (spec §49–53) */
+  @Get('projects/:id/database/overview')
+  databaseOverview(@Auth() a: AuthInfo, @Param('id') id: string) {
+    return this.dbOps.overview(a, id);
+  }
+
+  @Get('projects/:id/migrations')
+  migrations(@Auth() a: AuthInfo, @Param('id') id: string) {
+    return this.dbOps.migrations(a, id);
+  }
+
+  @Get('projects/:id/deployment-window')
+  deploymentWindow(@Auth() a: AuthInfo, @Param('id') id: string) {
+    return this.deploy.deploymentWindow(a, id);
+  }
+
+  @Put('projects/:id/deployment-window')
+  setDeploymentWindow(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('id') id: string, @Body() body: unknown) {
+    return this.deploy.setDeploymentWindow(a, id, parse(deploymentWindowSchema, body), actor);
+  }
+
+  @Get('projects/:id/deployments/preflight')
+  preflight(@Auth() a: AuthInfo, @Param('id') id: string, @Query() q: unknown) {
+    const { environmentId, versionId } = parse(z.object({ environmentId: z.uuid(), versionId: z.uuid() }), q);
+    return this.dbOps.preflight(a, id, environmentId, versionId);
+  }
+
+  @Post('backups/:backupId/verify')
+  verifyBackup(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('backupId') backupId: string) {
+    return this.dbOps.verify(a, assertUuid(backupId, 'Yedek'), actor);
+  }
+
+  @Delete('backups/:backupId')
+  deleteBackup(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('backupId') backupId: string) {
+    return this.dbOps.remove(a, assertUuid(backupId, 'Yedek'), actor);
+  }
+
+  @Post('backups/:backupId/restore')
+  restore(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('backupId') backupId: string, @Body() body: unknown) {
+    const { environmentId } = parse(z.object({ environmentId: z.uuid() }), body);
+    return this.dbOps.requestRestore(a, assertUuid(backupId, 'Yedek'), environmentId, actor);
+  }
+
+  @Get('projects/:id/restores')
+  restores(@Auth() a: AuthInfo, @Param('id') id: string) {
+    return this.dbOps.restores(a, id);
+  }
+
+  @Post('restores/:restoreId/approve')
+  approveRestore(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('restoreId') restoreId: string) {
+    return this.dbOps.decideRestore(a, assertUuid(restoreId, 'Geri yükleme'), true, actor);
+  }
+
+  @Post('restores/:restoreId/reject')
+  rejectRestore(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('restoreId') restoreId: string) {
+    return this.dbOps.decideRestore(a, assertUuid(restoreId, 'Geri yükleme'), false, actor);
+  }
 
   /* environments */
   @Get('projects/:id/environments')
@@ -167,6 +228,17 @@ export class DeployController {
   @Post('projects/:id/security/scans')
   scan(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('id') id: string) {
     return this.security.startScan(a, id, actor);
+  }
+
+  @Post('security/findings/:findingId/resolve')
+  resolveFinding(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('findingId') findingId: string, @Body() body: unknown) {
+    const { note } = parse(z.object({ note: z.string().trim().max(1000).optional() }), body ?? {});
+    return this.security.resolveAndVerify(a, assertUuid(findingId, 'Bulgu'), note, actor);
+  }
+
+  @Get('security/findings/:findingId/verification')
+  findingVerification(@Auth() a: AuthInfo, @Param('findingId') findingId: string, @Query() q: unknown) {
+    return this.security.verification(a, assertUuid(findingId, 'Bulgu'), parse(z.object({ scanId: z.uuid() }), q).scanId);
   }
 
   @Post('security/findings/:findingId')

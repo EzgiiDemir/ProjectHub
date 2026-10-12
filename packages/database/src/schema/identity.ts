@@ -38,6 +38,8 @@ export const users = pgTable(
     status: varchar({ length: 30 }).$type<UserStatus>().notNull().default('invited'),
     failedLoginCount: integer().notNull().default(0),
     lockedUntil: ts(),
+    /** Per category: { inApp, email }. Missing categories use the defaults (both on). */
+    notificationPreferences: jsonb().$type<Record<string, { inApp?: boolean; email?: boolean }>>().notNull().default({}),
     emailVerifiedAt: ts(),
     lastLoginAt: ts(),
     lastActivityAt: ts(),

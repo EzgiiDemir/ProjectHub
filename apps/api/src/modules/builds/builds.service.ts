@@ -16,6 +16,7 @@ import {
   signPreviewTicket,
   timeline,
   type Actor,
+  retainPreviewArtifact,
 } from '@projecthub/core';
 import { durationToMinutes } from '@projecthub/contracts';
 import { artifacts, builds, buildSteps, deviceProfiles, previews, projectManifests, responsiveTestResults, responsiveTests, users } from '@projecthub/database';
@@ -52,6 +53,9 @@ export class BuildsService {
   /** Queues a build of a branch head (or a specific commit). Long work happens in the worker; returns immediately. */
   async create(auth: AuthInfo, idOrSlug: string, input: { branch?: string; commitSha?: string; createPreview: boolean }, actor: Actor, trigger = 'manual') {
     const scope = await this.access.requireWritable(auth, idOrSlug, 'build.create');
+    if ((scope.project.settings as { executionTrust?: string }).executionTrust === 'untrusted') {
+      throw precondition('Bu proje güvenilmeyen kaynak olarak işaretli. Worker üzerinde komut çalıştırmadan önce proje ayarlarında kaynağı açıkça güvenilir olarak onaylayın.');
+    }
     if (input.createPreview && !scope.can('preview.create')) throw forbidden('Ön izleme oluşturma yetkiniz yok');
     const { git } = await this.repos.forProject(scope.project.id);
     const branch = input.branch ?? scope.project.defaultBranch;
@@ -252,7 +256,7 @@ export class BuildsService {
     await this.ctx.db.update(previews).set({ expiresAt }).where(eq(previews.id, p.id));
     if (p.buildId) {
       const b = (await this.ctx.db.select({ a: builds.artifactId }).from(builds).where(eq(builds.id, p.buildId)))[0];
-      if (b?.a) await this.ctx.db.update(artifacts).set({ retentionUntil: expiresAt }).where(and(eq(artifacts.id, b.a), lt(artifacts.retentionUntil, expiresAt)));
+      if (b?.a) await retainPreviewArtifact(this.ctx.db, auth.organizationId, b.a, expiresAt);
     }
     await audit(this.ctx.db, { organizationId: auth.organizationId, projectId: p.projectId, actor, action: 'preview.extended', resourceType: 'preview', resourceId: p.id, metadata: { expiresAt } });
     return { expiresAt };

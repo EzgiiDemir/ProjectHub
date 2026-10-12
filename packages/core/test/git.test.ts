@@ -103,6 +103,33 @@ describe('GitRepository', () => {
     expect((await other.grep(sha, 'hakkımızda')).map((g) => g.path)).toEqual(['pages/about.html']);
   });
 
+  it('syncs from upstream without losing hub-side commits or hub-only branches', async () => {
+    const upstream = await GitRepository.initBare(path.join(tmp, 'upstream.git'), 'main');
+    const u1 = await upstream.commitChanges({ branch: 'main', baseCommit: null, message: 'U1', author, changes: [{ action: 'upsert', path: 'a.txt', content: '1\n' }] });
+    const hubDir = path.join(tmp, 'hub.git');
+    const hub = await GitRepository.cloneBare(upstream.dir, hubDir);
+    // Hub-side work: a hotfix branch and a commit on "dev" that upstream does not have.
+    await hub.createBranch('hotfix/PH-1', u1);
+    await upstream.createBranch('dev', u1);
+    await hub.createBranch('dev', u1);
+    const hubDev = await hub.commitChanges({ branch: 'dev', baseCommit: u1, message: 'hub work', author, changes: [{ action: 'upsert', path: 'hub.txt', content: 'h\n' }] });
+    // Upstream moves main (fast-forwardable), diverges dev, adds a branch and a tag.
+    const u2 = await upstream.commitChanges({ branch: 'main', baseCommit: u1, message: 'U2', author, changes: [{ action: 'upsert', path: 'a.txt', content: '2\n' }] });
+    await upstream.commitChanges({ branch: 'dev', baseCommit: u1, message: 'upstream dev', author, changes: [{ action: 'upsert', path: 'up.txt', content: 'u\n' }] });
+    await upstream.createBranch('feature/x', u2);
+    await upstream.createTag('v1.0.0', u2, 'v1', author);
+
+    const report = await hub.syncFromUpstream(upstream.dir);
+    expect(report.updated).toEqual(['main']);
+    expect(report.created).toEqual(['feature/x']);
+    expect(report.diverged).toEqual(['dev']);
+    expect(report.tags).toEqual(['v1.0.0']);
+    expect(await hub.resolve('main')).toBe(u2);
+    expect(await hub.resolve('dev')).toBe(hubDev);
+    expect(await hub.resolve('hotfix/PH-1')).toBe(u1);
+    expect(await hub.text(['for-each-ref', 'refs/projecthub-upstream/'])).toBe('');
+  });
+
   it('rejects path traversal', () => {
     expect(() => normaliseRepoPath('../etc/passwd')).toThrow();
     expect(() => normaliseRepoPath('.git/config')).toThrow();

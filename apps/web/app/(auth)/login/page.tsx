@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useState, type FormEvent } from 'react';
 import { api, errorMessage } from '@/lib/api';
+import { ArucadLogo } from '@/components/brand/logo';
 import { Field } from '@/components/ui';
 
 function LoginForm() {
@@ -34,9 +35,9 @@ function LoginForm() {
 
   return (
     <form className="card" onSubmit={submit}>
-      <div className="row" style={{ marginBottom: 20 }}>
-        <span className="brand-mark">PH</span>
-        <b style={{ fontSize: 17 }}>Project Hub</b>
+      <div className="auth-brand">
+        <ArucadLogo height={38} priority />
+        <span>Project Hub</span>
       </div>
       <h1 style={{ marginBottom: 6 }}>Giriş yapın</h1>
       <p className="sub" style={{ marginBottom: 18 }}>Şirket hesabınızla devam edin.</p>

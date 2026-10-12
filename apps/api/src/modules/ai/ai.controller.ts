@@ -1,20 +1,28 @@
-import { Body, Controller, Get, Param, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { z } from 'zod';
-import { aiDecisionSchema, aiFixSchema, aiQuerySchema } from '@projecthub/contracts';
+import { AI_TASK_TYPES, aiDecisionSchema, aiFixSchema, aiMemoryCreateSchema, aiMemoryUpdateSchema, aiQuerySchema } from '@projecthub/contracts';
 import { AppError, type Actor } from '@projecthub/core';
-import type { AuthInfo } from '../../infra/context.js';
+import { Ctx, type AuthInfo } from '../../infra/context.js';
 import { assertUuid, Auth, CurrentActor, parse } from '../../infra/http.js';
 import { openSse } from '../../infra/realtime.js';
-import { AiService } from './ai.service.js';
+import { AiService, type AiStatusResult } from './ai.service.js';
 
 @Controller()
 export class AiController {
-  constructor(private readonly svc: AiService) {}
+  constructor(
+    private readonly svc: AiService,
+    private readonly ctx: Ctx,
+  ) {}
 
   @Get('ai/status')
-  status(@Auth() a: AuthInfo) {
+  status(@Auth() a: AuthInfo): Promise<AiStatusResult> {
     return this.svc.status(a);
+  }
+
+  @Get('ai/portfolio')
+  portfolio(@Auth() a: AuthInfo) {
+    return this.svc.portfolio(a);
   }
 
   @Get('projects/:id/ai/conversations')
@@ -42,6 +50,7 @@ export class AiController {
       if (!closed) send('done', result);
     } catch (e) {
       if (!closed) {
+        if (!(e instanceof AppError)) this.ctx.logger.error({ err: e, projectId: id }, 'AI ask failed');
         const err = e instanceof AppError ? { code: e.code, message: e.message } : { code: 'INTERNAL_ERROR', message: 'AI yanıtı alınamadı. Daha sonra tekrar deneyin.' };
         send('error', err);
       }
@@ -55,12 +64,38 @@ export class AiController {
     return this.svc.listTasks(a, id);
   }
 
+  @Get('projects/:id/ai/memory')
+  memory(@Auth() a: AuthInfo, @Param('id') id: string) {
+    return this.svc.memory(a, id);
+  }
+
+  @Post('projects/:id/ai/memory')
+  createMemory(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('id') id: string, @Body() body: unknown) {
+    return this.svc.createMemory(a, id, parse(aiMemoryCreateSchema, body), actor);
+  }
+
+  @Patch('projects/:id/ai/memory/:memoryId')
+  updateMemory(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('id') id: string, @Param('memoryId') memoryId: string, @Body() body: unknown) {
+    return this.svc.updateMemory(a, id, assertUuid(memoryId, 'Hafıza kaydı'), parse(aiMemoryUpdateSchema, body), actor);
+  }
+
+  @Post('projects/:id/ai/reindex')
+  reindex(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('id') id: string) {
+    return this.svc.reindex(a, id, actor);
+  }
+
+  @Post('projects/:id/ai/memory/:memoryId/delete')
+  deleteMemory(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('id') id: string, @Param('memoryId') memoryId: string) {
+    return this.svc.deleteMemory(a, id, assertUuid(memoryId, 'Hafıza kaydı'), actor);
+  }
+
   @Post('projects/:id/ai/tasks')
   createTask(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('id') id: string, @Body() body: unknown) {
     const input = parse(
       z.object({
         title: z.string().trim().max(200).optional(),
         instruction: z.string().trim().max(4000).optional(),
+        type: z.enum(AI_TASK_TYPES).optional(),
         sourceType: z.enum(['feedback', 'build', 'finding', 'manual']).default('manual'),
         sourceId: z.uuid().optional(),
       }),
@@ -90,6 +125,11 @@ export class AiController {
   @Post('ai/tasks/:taskId/reject')
   reject(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('taskId') taskId: string, @Body() body: unknown) {
     return this.svc.reject(a, assertUuid(taskId, 'AI görevi'), parse(aiDecisionSchema, body).comment, actor);
+  }
+
+  @Post('ai/tasks/:taskId/cancel')
+  cancel(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('taskId') taskId: string) {
+    return this.svc.cancel(a, assertUuid(taskId, 'AI görevi'), actor);
   }
 
   @Post('builds/:buildId/analyze')

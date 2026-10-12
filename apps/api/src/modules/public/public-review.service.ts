@@ -37,6 +37,7 @@ import { parseCookies } from '../../infra/http.js';
 import { insertFeedback } from '../reviews/feedback.service.js';
 import { ReviewsService, reviewStatus, type ReviewRow } from '../reviews/reviews.service.js';
 import { describeUserAgent } from '../reviews/ua.js';
+import { organizationLogo, projectBrandingOf } from '../branding/branding.service.js';
 
 export const visitorCookie = (r: ReviewRow) => `ph_rv_${r.id.replace(/-/g, '').slice(-12)}`;
 
@@ -87,9 +88,11 @@ export class PublicReviewService {
     const creator = r.createdBy ? (await this.ctx.db.select({ displayName: users.displayName, email: users.email }).from(users).where(eq(users.id, r.createdBy)))[0] : null;
     const status = reviewStatus(r);
     const v = status === 'active' ? await this.visitor(req, r) : null;
+    const brand = projectBrandingOf(p.settings);
     return {
       status,
       project: { name: p.name, customerName: p.customerName, color: p.color, short: p.name.split(/\s+/).map((w) => w[0]).join('').slice(0, 2).toUpperCase() },
+      branding: { companyLogo: await organizationLogo(this.ctx.db, r.organizationId), projectLogo: brand.logo, customerLogo: brand.customerLogo, accent: brand.accent },
       review: { name: r.name, versionLabel: r.versionLabel, expiresAt: r.expiresAt, capabilities: r.capabilities, passwordRequired: !!r.passwordHash },
       contact: creator ? { name: creator.displayName, email: creator.email } : null,
       visitor: v ? { firstName: v.firstName, lastName: v.lastName, department: v.department, company: v.company, email: v.email } : null,
@@ -267,7 +270,7 @@ export class PublicReviewService {
         projectId: r.projectId,
         kind: 'feedback',
         tone: decision === 'approve' ? 'ok' : 'warn',
-        title: `FB-${f.number}: müşteri ${decision === 'approve' ? 'onayladı' : 'yeniden düzeltme istedi'}`,
+        title: `FB-${f.number}: kullanıcı ${decision === 'approve' ? 'onayladı' : 'yeniden düzeltme istedi'}`,
         description: f.title,
         actorLabel: actor.label,
         refType: 'feedback',

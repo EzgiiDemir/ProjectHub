@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Client as FtpClient } from 'basic-ftp';
 import SftpClient from 'ssh2-sftp-client';
+import { copyDir, relinkMoved } from '@projecthub/core';
 import type { deploymentTargets } from '@projecthub/database';
 
 export type TargetRow = typeof deploymentTargets.$inferSelect;
@@ -26,6 +27,23 @@ export interface DeployAdapterImpl {
 }
 
 const posix = path.posix;
+
+/**
+ * Renames can fail transiently right after an upload on Windows hosts (a handle still closing, antivirus or
+ * indexer scanning the new files): EPERM/EBUSY locally, "550" over FTP. Retry briefly before giving up.
+ */
+async function withRenameRetry<T>(fn: () => Promise<T>, attempts = 6): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const err = e as { code?: string | number; message?: string };
+      const transient = err.code === 'EPERM' || err.code === 'EBUSY' || err.code === 'EACCES' || err.code === 550 || /^550\b/.test(String(err.message ?? ''));
+      if (!transient || i >= attempts) throw e;
+      await new Promise((r) => setTimeout(r, 150 * i));
+    }
+  }
+}
 
 /**
  * Release layout on the target (same for every adapter):
@@ -65,14 +83,16 @@ export class LocalAdapter implements DeployAdapterImpl {
     await fs.mkdir(path.dirname(l.live), { recursive: true });
     await fs.rm(l.staging, { recursive: true, force: true });
     log(`Kopyalanıyor → ${l.staging}`);
-    await fs.cp(sourceDir, l.staging, { recursive: true });
+    // copyDir recreates links (Turbopack server externals) without the Windows symlink privilege.
+    await copyDir(sourceDir, l.staging);
     let previousPath: string | null = null;
     if (await exists(l.live)) {
-      await fs.rename(l.live, l.previous);
+      await withRenameRetry(() => fs.rename(l.live, l.previous));
       previousPath = l.previous;
       log(`Önceki sürüm saklandı → ${l.previous}`);
     }
-    await fs.rename(l.staging, l.live);
+    await withRenameRetry(() => fs.rename(l.staging, l.live));
+    await relinkMoved(l.staging, l.live);
     log(`Yeni sürüm yayında → ${l.live}`);
     await this.prune(l, log);
     return { releaseId, previousPath };
@@ -80,9 +100,9 @@ export class LocalAdapter implements DeployAdapterImpl {
 
   async rollback(ref: ReleaseRef, log: (l: string) => void) {
     const l = layout(this.target.remotePath, ref.releaseId);
-    if (await exists(l.live)) await fs.rename(l.live, l.failed);
+    if (await exists(l.live)) await withRenameRetry(() => fs.rename(l.live, l.failed));
     if (ref.previousPath && (await exists(ref.previousPath))) {
-      await fs.rename(ref.previousPath, l.live);
+      await withRenameRetry(() => fs.rename(ref.previousPath!, l.live));
       log(`Önceki sürüm geri yüklendi (${ref.previousPath})`);
     } else log('Geri yüklenecek önceki sürüm yok; canlı klasör kaldırıldı');
   }
@@ -265,16 +285,18 @@ export class FtpAdapter implements DeployAdapterImpl {
     await this.client.uploadFromDir(sourceDir, l.staging);
     let previousPath: string | null = null;
     if (await this.exists(l.live)) {
-      await this.client.rename(l.live, l.previous);
+      await withRenameRetry(() => this.client.rename(l.live, l.previous));
       previousPath = l.previous;
       log(`Önceki sürüm saklandı → ${l.previous}`);
     }
-    await this.client.rename(l.staging, l.live);
+    await withRenameRetry(() => this.client.rename(l.staging, l.live));
     log(`Yeni sürüm yayında → ${l.live}`);
     const keep = this.target.configuration.keepReleases ?? 3;
-    const list = (await this.client.list(l.parent)).map((e) => e.name).filter((n) => n.startsWith(`${l.base}.__ph_prev_`)).sort();
-    for (const n of list.slice(0, Math.max(0, list.length - keep))) {
+    const list = (await this.client.list(l.parent)).map((e) => e.name).filter((n) => n.startsWith(`${l.base}.__ph_prev_`) || n.startsWith(`${l.base}.__ph_failed_`)).sort();
+    const prevs = list.filter((n) => n.includes('__ph_prev_'));
+    for (const n of [...prevs.slice(0, Math.max(0, prevs.length - keep)), ...list.filter((x) => x.includes('__ph_failed_'))]) {
       await this.client.removeDir(posix.join(l.parent, n));
+      await this.client.cd('/');
       log(`Eski sürüm temizlendi: ${n}`);
     }
     return { releaseId, previousPath };
@@ -283,9 +305,9 @@ export class FtpAdapter implements DeployAdapterImpl {
   async rollback(ref: ReleaseRef, log: (l: string) => void) {
     await this.connect();
     const l = layout(this.target.remotePath, ref.releaseId);
-    if (await this.exists(l.live)) await this.client.rename(l.live, l.failed);
+    if (await this.exists(l.live)) await withRenameRetry(() => this.client.rename(l.live, l.failed));
     if (ref.previousPath && (await this.exists(ref.previousPath))) {
-      await this.client.rename(ref.previousPath, l.live);
+      await withRenameRetry(() => this.client.rename(ref.previousPath!, l.live));
       log(`Önceki sürüm geri yüklendi (${ref.previousPath})`);
     }
   }

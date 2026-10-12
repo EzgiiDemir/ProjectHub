@@ -1,0 +1,186 @@
+# Project Hub on a single server (spec: 8 GB RAM / 200 GB disk to start).
+#
+#   cp deploy/.env.production.example deploy/.env    # fill in domain, secrets, ACME e-mail and DNS provider
+#   docker compose -f deploy/compose.yaml --env-file deploy/.env up -d --build
+#   docker compose -f deploy/compose.yaml --env-file deploy/.env exec api \
+#       node packages/core/dist/cli/create-admin.js --email you@company.com --name "Ad Soyad" --org "Şirket"
+#
+# Routing (Traefik):
+#   https://<PH_DOMAIN>/api/*, /git/*    → api:4000   (REST API, Git over HTTPS)
+#   https://<PH_DOMAIN>/*                → web:3100   (Next.js UI and customer portal /r/…)
+#   https://<slug>.preview.<PH_DOMAIN>  → api:4100   (preview gateway; needs a wildcard DNS record + DNS-01 certificate)
+
+name: projecthub
+
+x-app-env: &app-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  APP_URL: https://${PH_DOMAIN}
+  REVIEW_BASE_URL: https://${PH_DOMAIN}/r
+  DATABASE_URL: postgres://projecthub:${POSTGRES_PASSWORD}@postgres:5432/projecthub
+  STORAGE_DIR: /data/storage
+  APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY}
+  COOKIE_SECURE: 'true'
+  SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+  API_PORT: '4000'
+  PREVIEW_PORT: '4100'
+  PREVIEW_BASE_DOMAIN: preview.${PH_DOMAIN}
+  PREVIEW_PUBLIC_URL_TEMPLATE: https://{slug}.preview.${PH_DOMAIN}
+  PREVIEW_PORT_RANGE: ${PREVIEW_PORT_RANGE:-41000-41999}
+  BUILD_CONCURRENCY: ${BUILD_CONCURRENCY:-1}
+  BUILD_TIMEOUT_MINUTES: ${BUILD_TIMEOUT_MINUTES:-20}
+  # The worker container deliberately has no daemon socket; nested per-build containers are a standalone-runner option.
+  BUILD_EXECUTOR: host
+  DEPLOY_LOCAL_ROOTS: ${DEPLOY_LOCAL_ROOTS:-}
+  OSV_API_URL: ${OSV_API_URL:-https://api.osv.dev}
+  BROWSER_AUTOMATION: 'true'
+  OLLAMA_BASE_URL: http://ollama:11434
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+  OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-embeddinggemma:300m-qat-q4_0}
+  OLLAMA_REQUEST_TIMEOUT_SECONDS: ${OLLAMA_REQUEST_TIMEOUT_SECONDS:-300}
+  OLLAMA_CONTEXT_TOKENS: ${OLLAMA_CONTEXT_TOKENS:-16384}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-Project Hub <noreply@localhost>}
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: projecthub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: projecthub
+      # Turkish text must sort/compare correctly and survive any client encoding.
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale-provider=builtin --builtin-locale=C.UTF-8
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U projecthub -d projecthub']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    shm_size: 256mb
+    networks: [backend]
+
+  ollama:
+    image: ollama/ollama:0.12.3
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ['CMD', 'ollama', 'list']
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    # No host port: inference traffic stays on backend. model-egress exists only for explicit model downloads.
+    networks: [backend, model-egress]
+
+  api:
+    build: { context: .., target: api }
+    image: projecthub-api
+    restart: unless-stopped
+    environment: *app-env
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [frontend, backend]
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.ph-api.rule: Host(`${PH_DOMAIN}`) && (PathPrefix(`/api/`) || PathPrefix(`/git/`))
+      traefik.http.routers.ph-api.entrypoints: websecure
+      traefik.http.routers.ph-api.tls.certresolver: le
+      traefik.http.routers.ph-api.service: ph-api
+      traefik.http.services.ph-api.loadbalancer.server.port: '4000'
+      traefik.http.routers.ph-preview.rule: HostRegexp(`^[a-z0-9-]+\.preview\.${PH_DOMAIN_REGEX}$`)
+      traefik.http.routers.ph-preview.entrypoints: websecure
+      traefik.http.routers.ph-preview.tls.certresolver: le-dns
+      traefik.http.routers.ph-preview.tls.domains[0].main: '*.preview.${PH_DOMAIN}'
+      traefik.http.routers.ph-preview.service: ph-preview
+      traefik.http.services.ph-preview.loadbalancer.server.port: '4100'
+
+  worker:
+    build: { context: .., target: worker }
+    image: projecthub-worker
+    restart: unless-stopped
+    environment: *app-env
+    volumes:
+      - storage:/data/storage
+    # Shares the api container's network namespace: the preview gateway (in api) reaches app previews the
+    # worker starts on 127.0.0.1:<PREVIEW_PORT_RANGE>, and previews are never exposed on the network.
+    network_mode: service:api
+    depends_on:
+      api: { condition: service_healthy }
+    shm_size: 1gb
+    stop_grace_period: 60s
+
+  web:
+    build:
+      context: ..
+      target: web
+      args:
+        API_INTERNAL_URL: http://api:4000
+    image: projecthub-web
+    restart: unless-stopped
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [frontend, backend]
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.ph-web.rule: Host(`${PH_DOMAIN}`)
+      traefik.http.routers.ph-web.entrypoints: websecure
+      traefik.http.routers.ph-web.tls.certresolver: le
+      traefik.http.services.ph-web.loadbalancer.server.port: '3100'
+
+  traefik:
+    # v3.6+ negotiates the Docker API version; v3.5 gets "API returned a 400" from Docker Engine 29 and routes nothing.
+    image: traefik:v3.6
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      # api/web also sit on the internal backend network; route only through the network Traefik shares with them.
+      - --providers.docker.network=projecthub_frontend
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.websecure.address=:443
+      # Long uploads (project import up to 300 MB) and SSE streams (build logs, AI answers).
+      - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=15m
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      # Wildcard certificate for *.preview.<domain> requires a DNS-01 challenge (see deploy/README.md).
+      - --certificatesresolvers.le-dns.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.le-dns.acme.storage=/letsencrypt/acme-dns.json
+      - --certificatesresolvers.le-dns.acme.dnschallenge.provider=${ACME_DNS_PROVIDER}
+    env_file:
+      - path: ./.env.dns
+        required: false
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks: [frontend]
+
+volumes:
+  pgdata:
+  storage:
+  letsencrypt:
+  ollama_data:
+
+networks:
+  frontend:
+    name: projecthub_frontend
+  backend:
+    internal: true
+  model-egress:

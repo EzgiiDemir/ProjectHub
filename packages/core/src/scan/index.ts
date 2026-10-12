@@ -1,7 +1,8 @@
 import { sha256 } from '../crypto.js';
 import { scanCode } from './code.js';
 import { scanConfig } from './config.js';
-import { parseDependencies, scanDependencies } from './dependencies.js';
+import { scanInfrastructure } from './infra.js';
+import { parseDependencies, scanDependencies, type InventoryItem, type PackageRegistries } from './dependencies.js';
 import { scanSecrets } from './secrets.js';
 import { isScannable, type RawFinding } from './types.js';
 
@@ -9,10 +10,12 @@ export * from './types.js';
 export * from './secrets.js';
 export * from './code.js';
 export * from './config.js';
+export * from './infra.js';
 export * from './dependencies.js';
 export * from './migrations.js';
 export * from './codeindex.js';
 export * from './score.js';
+export * from './architecture.js';
 
 export interface RepositorySnapshot {
   files: { path: string; size: number | null }[];
@@ -24,14 +27,17 @@ export interface RepositoryScanResult {
   filesScanned: number;
   packagesScanned: number;
   notes: string[];
+  /** Every parsed dependency with its latest registry release (direct ones). */
+  dependencies: InventoryItem[];
 }
 
-const DEPENDENCY_FILES = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'composer.lock', 'requirements.txt', 'go.mod', 'Cargo.lock'];
+/** Root-level manifest and lock files the dependency scanner reads. */
+export const DEPENDENCY_FILES = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'composer.json', 'composer.lock', 'requirements.txt', 'go.mod', 'Cargo.lock'];
 
 /** Runs every scanner over a repository snapshot (one commit). */
 export async function scanRepository(
   snap: RepositorySnapshot,
-  opts: { secretScan: boolean; dependencyScan: boolean; osvUrl: string; fetchImpl?: typeof fetch; checkOutdated?: boolean },
+  opts: { secretScan: boolean; dependencyScan: boolean; osvUrl: string; fetchImpl?: typeof fetch; registries?: PackageRegistries },
 ): Promise<RepositoryScanResult> {
   const findings: RawFinding[] = [];
   const configFiles = new Map<string, string>();
@@ -46,10 +52,12 @@ export async function scanRepository(
     if (isConfig) configFiles.set(f.path, content);
     if (opts.secretScan) findings.push(...scanSecrets(f.path, content));
     findings.push(...scanCode(f.path, content));
+    if (/\.(ya?ml|tf)$/i.test(f.path)) findings.push(...scanInfrastructure(f.path, content));
   }
   findings.push(...scanConfig(snap.files.map((f) => f.path), configFiles));
 
   let packagesScanned = 0;
+  let dependencies: InventoryItem[] = [];
   const notes: string[] = [];
   if (opts.dependencyScan) {
     const depFiles = new Map<string, string>();
@@ -59,9 +67,10 @@ export async function scanRepository(
       if (c !== null) depFiles.set(name, c);
     }
     const deps = parseDependencies(depFiles);
-    const r = await scanDependencies(deps, { osvUrl: opts.osvUrl, fetchImpl: opts.fetchImpl, checkOutdated: opts.checkOutdated });
+    const r = await scanDependencies(deps, { osvUrl: opts.osvUrl, fetchImpl: opts.fetchImpl, registries: opts.registries });
     findings.push(...r.findings);
     packagesScanned = r.packagesScanned;
+    dependencies = r.inventory;
     notes.push(...r.notes);
   }
 
@@ -71,5 +80,5 @@ export async function scanRepository(
     const fingerprint = sha256(`${f.ruleId}|${f.identity}`);
     if (!unique.has(fingerprint)) unique.set(fingerprint, { ...f, fingerprint });
   }
-  return { findings: [...unique.values()], filesScanned, packagesScanned, notes };
+  return { findings: [...unique.values()], filesScanned, packagesScanned, notes, dependencies };
 }

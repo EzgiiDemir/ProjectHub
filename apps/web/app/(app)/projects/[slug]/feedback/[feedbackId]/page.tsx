@@ -128,7 +128,7 @@ export default function FeedbackDetailPage() {
                         <div className="small">
                           <b>{c.author}</b>{' '}
                           <span className="muted">
-                            {c.authorType === 'customer' ? 'müşteri' : c.authorType === 'system' ? 'sistem' : c.authorType === 'ai' ? 'AI' : 'ekip'} · {ago(c.createdAt)}
+                            {c.authorType === 'customer' ? 'kullanıcı' : c.authorType === 'system' ? 'sistem' : c.authorType === 'ai' ? 'AI' : 'ekip'} · {ago(c.createdAt)}
                           </span>
                         </div>
                         <div style={{ whiteSpace: 'pre-wrap', fontSize: 13.5 }}>{c.body}</div>
@@ -144,7 +144,7 @@ export default function FeedbackDetailPage() {
                       if (comment.trim()) addComment.mutate();
                     }}
                   >
-                    <textarea className="in" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Yorum yazın. Müşteri linkten bu yorumları görür." maxLength={5000} />
+                    <textarea className="in" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Yorum yazın. Kullanıcı linkten bu yorumları görür." maxLength={5000} />
                     <div style={{ textAlign: 'right', marginTop: 6 }}>
                       <button className="btn pri" disabled={!comment.trim() || addComment.isPending}>
                         Yorum ekle
@@ -156,7 +156,7 @@ export default function FeedbackDetailPage() {
               <div className="grid" style={{ gap: 14 }}>
                 {can('feedback.manage') && (
                   <Panel title="Yönetim">
-                    <Field label="Durum" id="fb-status" hint={f.status === 'ready_for_review' ? 'Müşteri linkten onaylayınca çözülür.' : undefined}>
+                    <Field label="Durum" id="fb-status" hint={f.status === 'ready_for_review' ? 'Kullanıcı linkten onaylayınca çözülür.' : undefined}>
                       <select id="fb-status" className="in" value={f.status} onChange={(e) => update.mutate({ status: e.target.value })} disabled={update.isPending}>
                         {STATUSES.map((s) => (
                           <option key={s} value={s}>
@@ -196,7 +196,7 @@ export default function FeedbackDetailPage() {
                       ['Öğe', f.domSelector ? <code key="d" className="small">{f.domSelector}</code> : '—'],
                       ['Konum', f.x !== null ? `x ${f.x}, y ${f.y} (kaydırma ${f.scrollY})` : '—'],
                       ['Sürüm', f.versionLabel ?? '—'],
-                      ['Müşteri linki', f.reviewKey ? <Link key="rv" href={`/projects/${slug}/reviews?open=${f.reviewSessionId}`}>{f.reviewKey}</Link> : 'ekip içi'],
+                      ['Kullanıcı linki', f.reviewKey ? <Link key="rv" href={`/projects/${slug}/reviews?open=${f.reviewSessionId}`}>{f.reviewKey}</Link> : 'ekip içi'],
                       ['Görev', f.taskKey ? <Link key="t" href={`/projects/${slug}/tasks`}>{f.taskKey}</Link> : '—'],
                       ['Oluşturulma', dateTime(f.createdAt)],
                       ['Çözülme', f.resolvedAt ? dateTime(f.resolvedAt) : '—'],

@@ -13,7 +13,7 @@ import { Async, Avatar, Badge, Empty, Panel, StatusBadge } from '@/components/ui
 const FILTERS: [string, string][] = [
   ['open', 'Açık'],
   ['mine', 'Bana atanan'],
-  ['ready_for_review', 'Müşteri onayında'],
+  ['ready_for_review', 'Kullanıcı onayında'],
   ['resolved', 'Çözüldü'],
   ['all', 'Tümü'],
 ];
@@ -31,7 +31,7 @@ export default function FeedbackPage() {
     <>
       <div style={{ marginBottom: 12 }}>
         <h2 style={{ margin: 0 }}>Geri bildirimler</h2>
-        <p className="sub">Müşteri linklerinden ve ekip içi testlerden gelen yorum, hata ve değişiklik talepleri; sayfa, cihaz ve ekran görüntüsüyle birlikte.</p>
+        <p className="sub">Kullanıcı linklerinden ve ekip içi testlerden gelen yorum, hata ve değişiklik talepleri; sayfa, cihaz ve ekran görüntüsüyle birlikte.</p>
       </div>
       <div className="spread" style={{ marginBottom: 10 }}>
         <div className="row">
@@ -104,7 +104,7 @@ export default function FeedbackPage() {
               </div>
             </Panel>
           ) : (
-            <Empty title="Bu filtrede geri bildirim yok">Müşteri linki gönderdiğinizde gelen geri bildirimler burada toplanır.</Empty>
+            <Empty title="Bu filtrede geri bildirim yok">Kullanıcı linki gönderdiğinizde gelen geri bildirimler burada toplanır.</Empty>
           );
         }}
       </Async>

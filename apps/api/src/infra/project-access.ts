@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import type { Permission } from '@projecthub/contracts';
-import { forbidden, getProjectAccess, notFound } from '@projecthub/core';
+import { forbidden, getProjectAccess, notFound, usersWithProjectPermission } from '@projecthub/core';
 import { projects } from '@projecthub/database';
 import { Ctx, type AuthInfo } from './context.js';
 import { uuidPattern } from './http.js';
@@ -43,6 +43,11 @@ export class ProjectAccess {
       isMember: access.isMember,
       can: (p) => access.permissions.has(p),
     };
+  }
+
+  /** True when `userId` is an active organization member who can see the project (assignees, mentions). */
+  async userCanSee(organizationId: string, projectId: string, userId: string): Promise<boolean> {
+    return (await usersWithProjectPermission(this.ctx.db, organizationId, projectId, 'project.read')).includes(userId);
   }
 
   /** Write operations are refused on archived projects (they stay readable). */

@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { and, asc, eq, inArray, lt, ne } from 'drizzle-orm';
@@ -13,12 +14,14 @@ import {
   resolveEnvSecrets,
   timeline,
   type JobContext,
+  retainPreviewArtifact,
+  missingRequiredEnv,
 } from '@projecthub/core';
 import { artifacts, builds, previews } from '@projecthub/database';
 import { loadProject, type WorkerCtx } from '../context.js';
 import { registerLifecycle } from '../lifecycle.js';
 import { registerPeriodic } from './maintenance.js';
-import { expandPort, isPortFree, killTree, sanitizedEnv, startService } from '../runner/process.js';
+import { expandPort, isPortFree, killPortListener, killTree, runtimeEnv, sanitizedEnv, startService } from '../runner/process.js';
 
 /** Processes started by this worker instance (previewId → child). */
 const running = new Map<string, ChildProcess>();
@@ -69,8 +72,8 @@ export async function startPreview(ctx: WorkerCtx, { job, logger }: JobContext) 
   };
   if (!build || build.status !== 'passed' || !artifact) return fail('Build artifact\'ı bulunamadı (build başarılı değil veya artifact silinmiş)');
   if (!(await ctx.storage.exists(artifact.storageKey))) return fail('Artifact dosyaları saklama politikası gereği silinmiş; yeniden build alın');
-  // Keep the artifact while a preview uses it.
-  await db.update(artifacts).set({ retentionUntil: pv.expiresAt }).where(and(eq(artifacts.id, artifact.id), lt(artifacts.retentionUntil, pv.expiresAt)));
+  // Keep the artifact while a preview uses it (plus the preview-build retention window).
+  await retainPreviewArtifact(db, project.organizationId, artifact.id, pv.expiresAt);
 
   if (build.outputKind !== 'process') {
     await db.update(previews).set({ kind: 'static', status: 'ready', rootKey: artifact.storageKey, error: null }).where(eq(previews.id, pv.id));
@@ -82,12 +85,14 @@ export async function startPreview(ctx: WorkerCtx, { job, logger }: JobContext) 
     await db.update(previews).set({ kind: 'process', status: 'starting', rootKey: artifact.storageKey, internalPort: port, runnerId: ctx.workerId, error: null }).where(eq(previews.id, pv.id));
     await publish(db, { type: 'preview.updated', organizationId: project.organizationId, projectId: project.id, id: pv.id });
     const secrets = await resolveEnvSecrets(db, ctx.config.encryptionKey, { organizationId: project.organizationId, projectId: project.id, environmentId: null, scope: 'runtime' });
+    const missing = missingRequiredEnv(manifest, secrets);
+    if (missing.length) return fail(`Zorunlu ortam değişkeni eksik: ${missing.join(', ')}. Secret'lar ekranından "Çalışma" veya "Tümü" kullanımıyla ekleyin.`);
     const logKey = ctx.storage.previewLogKey(project.id, pv.id);
     await ctx.storage.ensureDir(path.dirname(logKey));
     const child = startService({
       command: expandPort(manifest.start.command, port),
       cwd: ctx.storage.resolve(artifact.storageKey),
-      env: sanitizedEnv({ ...secrets, PORT: String(port), HOST: '127.0.0.1', HOSTNAME: '127.0.0.1', NODE_ENV: 'production', PROJECTHUB_PREVIEW_URL: url }),
+      env: sanitizedEnv({ ...runtimeEnv(manifest.runtime?.type), ...secrets, PORT: String(port), HOST: '127.0.0.1', HOSTNAME: '127.0.0.1', NODE_ENV: 'production', PROJECTHUB_PREVIEW_URL: url }),
       logFile: ctx.storage.resolve(logKey),
     });
     running.set(pv.id, child);
@@ -135,7 +140,7 @@ async function enforcePreviewLimit(ctx: WorkerCtx, organizationId: string, excep
   const active = await ctx.db
     .select({ id: previews.id })
     .from(previews)
-    .where(and(eq(previews.kind, 'process'), inArray(previews.status, ['starting', 'ready']), ne(previews.id, exceptId)))
+    .where(and(eq(previews.organizationId, organizationId), eq(previews.kind, 'process'), inArray(previews.status, ['starting', 'ready']), ne(previews.id, exceptId)))
     .orderBy(asc(previews.createdAt));
   const excess = active.length - (retention.maxRunningPreviews - 1);
   for (const p of active.slice(0, Math.max(0, excess))) {
@@ -149,7 +154,8 @@ export async function stopPreviewNow(ctx: WorkerCtx, previewId: string, status: 
   const child = running.get(previewId);
   running.delete(previewId);
   if (child) killTree(child);
-  else if (pv.processId && pv.runnerId === ctx.workerId) killTree(pv.processId);
+  else if (pv.processId && pv.runnerId?.split(':')[0] === os.hostname()) killTree(pv.processId);
+  if (pv.kind === 'process' && pv.internalPort && pv.runnerId?.split(':')[0] === os.hostname()) await killPortListener(pv.internalPort);
   await ctx.db.update(previews).set({ status, stoppedAt: new Date(), processId: null, error: reason ?? null }).where(eq(previews.id, previewId));
   await timeline(ctx.db, {
     organizationId: pv.organizationId,
@@ -174,11 +180,12 @@ export async function stopPreview(ctx: WorkerCtx, { job }: JobContext) {
 registerLifecycle({
   start: async (ctx) => {
     const orphaned = await ctx.db
-      .select({ id: previews.id, organizationId: previews.organizationId, projectId: previews.projectId, processId: previews.processId })
+      .select({ id: previews.id, organizationId: previews.organizationId, projectId: previews.projectId, processId: previews.processId, internalPort: previews.internalPort })
       .from(previews)
       .where(and(eq(previews.kind, 'process'), inArray(previews.status, ['starting', 'ready'])));
     for (const p of orphaned) {
       if (p.processId) killTree(p.processId);
+      if (p.internalPort) await killPortListener(p.internalPort);
       await ctx.db.update(previews).set({ status: 'queued', processId: null }).where(eq(previews.id, p.id));
       await enqueue(ctx.db, { queue: QUEUES.preview, type: 'preview.start', projectId: p.projectId, organizationId: p.organizationId, payload: { previewId: p.id }, dedupeKey: `preview-start:${p.id}` });
     }

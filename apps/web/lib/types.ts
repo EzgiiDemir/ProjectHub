@@ -38,7 +38,7 @@ export interface ProjectSummary {
 
 export interface ProjectDetail extends ProjectSummary {
   detection: DetectionResult | null;
-  settings: { health?: HealthInfo; techDebt?: TechDebt } & Record<string, unknown>;
+  settings: { health?: HealthInfo; techDebt?: TechDebt; executionTrust?: 'trusted' | 'untrusted' } & Record<string, unknown>;
   team: { id: string; name: string } | null;
   repository: { status: string; error: string | null; defaultBranch: string; headCommit: string | null; sizeBytes: number; upstreamUrl: string | null; lastPushedAt: string | null; cloneUrl: string } | null;
   permissions: Permission[];
@@ -502,7 +502,47 @@ export interface AiStatus {
   model: string | null;
   autonomyLevel: string;
   policies: { createBranch: boolean; commitToAiBranch: boolean; runBuilds: boolean; createPreview: boolean };
+  selfHealing: { enabled: boolean; emergencyStop: boolean; autoRecheckHealth: boolean; maxAttemptsPerHour: number };
   monthlyTokenBudget: number;
   monthlyTokensUsed: number;
-  availableProviders: string[];
+  availableProviders: { ollama: boolean; anthropic: boolean; openai: boolean };
+  localRuntime: {
+    reachable: boolean;
+    baseUrl: string;
+    version: string | null;
+    models: { name: string; size: number; parameterSize: string | null; quantization: string | null }[];
+    loadedModels: { name: string; sizeVram: number | null; expiresAt: string | null }[];
+    error: string | null;
+  };
+}
+
+export interface PullRequest {
+  id: string;
+  key: string;
+  number: number;
+  title: string;
+  description: string;
+  sourceBranch: string;
+  targetBranch: string;
+  status: 'open' | 'merged' | 'closed';
+  authorId: string | null;
+  authorName: string;
+  mergedByName: string | null;
+  mergeCommit: string | null;
+  mergedAt: string | null;
+  closedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PullRequestDetail extends PullRequest {
+  headCommit: string | null;
+  targetCommit: string | null;
+  diff: Comparison | null;
+  mergeCheck: { upToDate: boolean; fastForward: boolean; conflicts: string[] } | null;
+  build: { id: string; number: number; status: Build['status'] } | null;
+  reviews: { id: string; userId: string | null; userName: string; decision: 'approved' | 'changes_requested'; body: string; commitSha: string; stale: boolean; createdAt: string }[];
+  comments: { id: string; authorType: string; author: string; body: string; path: string | null; line: number | null; createdAt: string }[];
+  checks: { protected: boolean; requiredApprovals: number; approvals: number; changesRequested: boolean; requiresBuild: boolean; buildStatus: string | null; blockers: string[]; mergeable: boolean };
+  permissions: { canReview: boolean; canMerge: boolean; canEdit: boolean };
 }

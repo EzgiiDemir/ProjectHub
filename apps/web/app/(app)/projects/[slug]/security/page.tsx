@@ -4,14 +4,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bot, ScanSearch } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FindingStatus } from '@projecthub/contracts';
 import { api, errorMessage } from '@/lib/api';
 import { ago, dateTime, shortSha } from '@/lib/format';
 import { useProject, useProjectSlug } from '@/lib/hooks';
 import { FINDING_TYPE, statusLabel } from '@/lib/labels';
 import type { Finding } from '@/lib/types';
-import { Async, Drawer, Empty, Field, KeyValue, Kpi, Panel, ScoreBar, scoreColor, StatusBadge } from '@/components/ui';
+import { Async, CopyButton, Drawer, Empty, Field, Kpi, Panel, ScoreBar, scoreColor, StatusBadge } from '@/components/ui';
+import { remediationFor } from '@/lib/remediation';
 import { useToast } from '@/components/toast';
 
 interface ProjectSecurity {
@@ -42,7 +43,7 @@ export default function SecurityPage() {
   const [type, setType] = useState('');
   const q = useQuery({
     queryKey: ['security', slug],
-    queryFn: () => api<ProjectSecurity>(`/projects/${slug}/security`),
+    queryFn: () => api<ProjectSecurity>(`/projects/${slug}/security?status=all`),
     refetchInterval: (query) => (query.state.data?.running ? 3000 : false),
   });
   const canManage = !!project?.permissions.includes('security.manage') && project.status !== 'archived';
@@ -183,66 +184,148 @@ function FindingDrawer({ slug, finding: f, canManage, canAi, onClose }: { slug: 
   const router = useRouter();
   const [next, setNext] = useState<FindingStatus | null>(null);
   const [reason, setReason] = useState('');
+  const [scanId, setScanId] = useState<string | null>(null);
+  const r = remediationFor(f, slug);
+  const refresh = () => void qc.invalidateQueries({ queryKey: ['security'] });
   const update = useMutation({
     mutationFn: (status: FindingStatus) => api(`/security/findings/${f.id}`, { method: 'POST', body: { status, reason: reason || undefined } }),
     onSuccess: () => {
       toast('Bulgu güncellendi');
       setNext(null);
       setReason('');
-      void qc.invalidateQueries({ queryKey: ['security'] });
+      refresh();
     },
     onError: (e) => toast(errorMessage(e), 'bad'),
   });
+  const resolve = useMutation({
+    mutationFn: () => api<{ scanId: string }>(`/security/findings/${f.id}/resolve`, { method: 'POST', body: {} }),
+    onSuccess: (res) => {
+      setScanId(res.scanId);
+      refresh();
+    },
+    onError: (e) => toast(errorMessage(e), 'bad'),
+  });
+  // Live result of the verification scan started by "Çözüldü".
+  const verification = useQuery({
+    queryKey: ['finding-verification', f.id, scanId],
+    queryFn: () => api<{ state: 'pending' | 'verified' | 'still_present' | 'unverifiable'; message: string }>(`/security/findings/${f.id}/verification?scanId=${scanId}`),
+    enabled: !!scanId,
+    refetchInterval: (q) => (q.state.data?.state === 'pending' || !q.state.data ? 2500 : false),
+  });
+  const v = verification.data;
+  useEffect(() => {
+    if (v && v.state !== 'pending') refresh();
+  }, [v?.state]);
   const aiFix = useMutation({
     mutationFn: () => api<{ id: string }>(`/projects/${slug}/ai/tasks`, { method: 'POST', body: { sourceType: 'finding', sourceId: f.id } }),
     onSuccess: (t) => router.push(`/projects/${slug}/ai/tasks/${t.id}`),
     onError: (e) => toast(errorMessage(e), 'bad'),
   });
+  const verifyTone = !v || v.state === 'pending' ? 'run' : v.state === 'verified' ? 'ok' : v.state === 'still_present' ? 'bad' : 'warn';
   return (
-    <Drawer title={`${f.key} · ${f.title}`} onClose={onClose}>
-      <div className="row" style={{ marginBottom: 12 }}>
+    <Drawer title={`${f.key} · ${f.title}`} onClose={onClose} wide>
+      <div className="row" style={{ marginBottom: 16, gap: 8 }}>
         <StatusBadge status={f.severity} />
         <StatusBadge status={f.status} />
-        <span className="small muted">{FINDING_TYPE[f.type]}</span>
+        <span className="tag">{FINDING_TYPE[f.type]}</span>
+        <span className="small muted">
+          İlk görülme {dateTime(f.firstSeenAt)} · son tarama {ago(f.lastSeenAt)}
+        </span>
       </div>
-      <p style={{ marginTop: 0, fontSize: 14 }}>{f.description}</p>
-      <KeyValue
-        items={[
-          ['Kural', <span key="r" className="mono small">{f.ruleId}</span>],
-          ...(f.filePath ? ([['Dosya', <Link key="f" className="mono small" href={`/projects/${slug}/code?path=${encodeURIComponent(f.filePath)}${f.line ? `&line=${f.line}` : ''}`}>{f.filePath}{f.line ? `:${f.line}` : ''}</Link>]] as [string, React.ReactNode][]) : []),
-          ...(f.packageName ? ([['Paket', <span key="p" className="mono small">{f.packageName}@{f.packageVersion}</span>], ['Düzeltilmiş sürüm', f.fixedVersion ?? 'yok']] as [string, React.ReactNode][]) : []),
-          ...(f.advisoryId ? ([['Bildirim', f.advisoryId]] as [string, React.ReactNode][]) : []),
-          ['İlk görülme', dateTime(f.firstSeenAt)],
-          ['Son görülme', dateTime(f.lastSeenAt)],
-          ...(f.statusReason ? ([['Gerekçe', f.statusReason]] as [string, React.ReactNode][]) : []),
-        ]}
-      />
-      {f.references.length > 0 && (
-        <div style={{ marginTop: 10 }}>
-          {f.references.slice(0, 5).map((r) => (
-            <div key={r} className="small ellipsis">
-              <a href={r} target="_blank" rel="noreferrer">
-                {r}
-              </a>
-            </div>
+
+      <section className="fx-section">
+        <h3>Sorun</h3>
+        <p>{r.problem}</p>
+        {r.where && (
+          <p className="small">
+            Nerede:{' '}
+            {f.filePath ? (
+              <Link className="mono" href={`/projects/${slug}/code?path=${encodeURIComponent(f.filePath)}${f.line ? `&line=${f.line}` : ''}`}>
+                {r.where}
+              </Link>
+            ) : (
+              <span className="mono">{r.where}</span>
+            )}
+          </p>
+        )}
+        {f.type === 'dependency' && f.packageName && (
+          <p className="small muted">
+            Paket <span className="mono">{f.packageName}@{f.packageVersion}</span>
+            {f.advisoryId && <> · {f.advisoryId}</>}
+            {f.fixedVersion && <> · düzeltilmiş sürüm <b className="mono">{f.fixedVersion}</b></>}
+          </p>
+        )}
+      </section>
+
+      <section className="fx-section">
+        <h3>Çözüm</h3>
+        <ol className="fx-steps">
+          {r.steps.map((s) => (
+            <li key={s}>{s}</li>
           ))}
+        </ol>
+        {r.command && (
+          <div className="fx-command">
+            <span className="small muted">{r.command.label}</span>
+            <code className="mono">{r.command.text}</code>
+            <CopyButton text={r.command.text} />
+          </div>
+        )}
+      </section>
+
+      {(r.links.length > 0 || (canAi && f.status === 'open')) && (
+        <section className="fx-section">
+          <h3>İşlemler</h3>
+          <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+            {r.links.map((l) =>
+              l.external ? (
+                <a key={l.href} className="btn" href={l.href} target="_blank" rel="noreferrer">
+                  {l.label} ↗
+                </a>
+              ) : (
+                <Link key={l.href} className="btn" href={l.href}>
+                  {l.label}
+                </Link>
+              ),
+            )}
+            {canAi && f.status === 'open' && f.type !== 'dependency' && (
+              <button className="btn" onClick={() => aiFix.mutate()} disabled={aiFix.isPending}>
+                <Bot /> AI düzeltme önersin
+              </button>
+            )}
+          </div>
+        </section>
+      )}
+
+      {scanId && (
+        <div className={`fx-verify ${verifyTone}`} role="status">
+          {(!v || v.state === 'pending') && <span className="spinner" />}
+          <div>
+            <b>{!v || v.state === 'pending' ? 'Çözüm doğrulanıyor' : v.state === 'verified' ? 'Çözüldü ve doğrulandı' : v.state === 'still_present' ? 'Sorun hâlâ mevcut' : 'Doğrulanamadı'}</b>
+            <div className="small">{v?.message ?? 'Varsayılan branch yeniden taranıyor…'}</div>
+          </div>
         </div>
       )}
+
+      {f.statusReason && f.status !== 'open' && (
+        <p className="small muted">
+          {statusLabel(f.status)} gerekçesi: {f.statusReason}
+        </p>
+      )}
+
       {canManage && (
-        <div style={{ marginTop: 18 }}>
+        <div className="fx-actions">
           {f.status === 'open' ? (
-            <div className="row">
-              <button className="btn" onClick={() => setNext('accepted')}>
-                Riski kabul et
-              </button>
+            <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
               <button className="btn" onClick={() => setNext('false_positive')}>
                 Yanlış alarm
               </button>
-              {canAi && f.type !== 'dependency' && (
-                <button className="btn pri" onClick={() => aiFix.mutate()} disabled={aiFix.isPending}>
-                  <Bot /> AI düzeltme önersin
-                </button>
-              )}
+              <button className="btn pri" onClick={() => resolve.mutate()} disabled={resolve.isPending || (!!scanId && (!v || v.state === 'pending'))} title="Bulguyu çözüldü olarak işaretler ve hemen yeniden tarayarak doğrular">
+                {resolve.isPending ? <span className="spinner" /> : '✓'} Çözüldü
+              </button>
+              <button className="btn" onClick={() => setNext('accepted')}>
+                Riski kabul et
+              </button>
             </div>
           ) : (
             f.status !== 'resolved' && (
@@ -256,14 +339,21 @@ function FindingDrawer({ slug, finding: f, canManage, canAi, onClose }: { slug: 
               <Field label={`${statusLabel(next)} — gerekçe`} id="fd-reason" hint="Denetim kaydına yazılır. Kabul edilen bulgular production'ı engellemez.">
                 <textarea id="fd-reason" className="in" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} />
               </Field>
-              <button className="btn pri" disabled={reason.trim().length < 5 || update.isPending} onClick={() => update.mutate(next)}>
-                Kaydet
-              </button>
+              <div className="row">
+                <button className="btn" onClick={() => setNext(null)}>
+                  Vazgeç
+                </button>
+                <button className="btn pri" disabled={reason.trim().length < 5 || update.isPending} onClick={() => update.mutate(next)}>
+                  Kaydet
+                </button>
+              </div>
             </div>
           )}
         </div>
       )}
-      {f.status === 'open' && <p className="small muted" style={{ marginTop: 16 }}>Kaynak düzeltildiğinde sonraki tarama bulguyu otomatik olarak “çözüldü” yapar.</p>}
+      <p className="small muted" style={{ marginTop: 14 }}>
+        Kural: <span className="mono">{f.ruleId}</span>. Kaynak düzeltildiğinde her tarama bulguyu kendiliğinden kapatır; “Çözüldü” bunu hemen kontrol eder.
+      </p>
     </Drawer>
   );
 }

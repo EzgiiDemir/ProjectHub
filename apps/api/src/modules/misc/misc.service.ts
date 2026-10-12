@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { and, count, desc, eq, gte, inArray, isNull, or, sql, type AnyColumn } from 'drizzle-orm';
 import { OPEN_FEEDBACK_STATUSES } from '@projecthub/contracts';
-import { ai, audit, emitDomainEvent, nextNumber, notFound, precondition, publish, timeline, type Actor } from '@projecthub/core';
+import { ai, audit, emitDomainEvent, enqueue, getOrgSettings, nextNumber, notFound, precondition, publish, QUEUES, timeline, type Actor } from '@projecthub/core';
 import {
+  aiRemediations,
   aiTasks,
   builds,
   deploymentApprovals,
@@ -93,7 +94,7 @@ export class MiscService {
         .innerJoin(projects, eq(projects.id, feedback.projectId))
         .where(and(inIds(feedback.projectId), isNull(feedback.assignedUserId), inArray(feedback.status, ['open', 'triaged'])))
         .groupBy(projects.slug, projects.name);
-      for (const u of unassigned) attention.push({ kind: 'feedback', title: `${u.n} müşteri geri bildirimi atanmayı bekliyor`, detail: u.pname, link: `/projects/${u.slug}/feedback`, tone: 'warn' });
+      for (const u of unassigned) attention.push({ kind: 'feedback', title: `${u.n} kullanıcı geri bildirimi atanmayı bekliyor`, detail: u.pname, link: `/projects/${u.slug}/feedback`, tone: 'warn' });
       const pendingDeploys = await db
         .select({ d: deployments, env: environments.name, envType: environments.type, slug: projects.slug, pname: projects.name, v: versions.version })
         .from(deployments)
@@ -290,7 +291,34 @@ export class MiscService {
     const checks = i.environmentId
       ? await this.ctx.db.select().from(healthChecks).where(and(eq(healthChecks.environmentId, i.environmentId), gte(healthChecks.checkedAt, new Date(i.startedAt.getTime() - 3600_000)))).orderBy(desc(healthChecks.checkedAt)).limit(120)
       : [];
-    return { ...i, key: `INC-${i.number}`, timeline: events, healthChecks: checks };
+    const remediations = await this.ctx.db.select().from(aiRemediations).where(eq(aiRemediations.incidentId, i.id)).orderBy(desc(aiRemediations.createdAt)).limit(50);
+    return { ...i, key: `INC-${i.number}`, timeline: events, healthChecks: checks, remediations };
+  }
+
+  async requestRemediation(auth: AuthInfo, incidentId: string, actor: Actor) {
+    const i = (await this.ctx.db.select().from(incidents).where(and(eq(incidents.id, incidentId), eq(incidents.organizationId, auth.organizationId))))[0];
+    if (!i) throw notFound('Olay');
+    await this.access.requireWritable(auth, i.projectId, 'environment.manage');
+    await this.access.require(auth, i.projectId, 'ai.execute');
+    if (i.status !== 'open' || i.source !== 'monitor' || !i.environmentId) throw precondition('Yalnızca açık izleme olaylarında sağlık kontrolü tekrarlanabilir');
+    const { ai: settings } = await getOrgSettings(this.ctx.db, auth.organizationId);
+    if (!settings.selfHealing.enabled) throw precondition('Kontrollü kendini iyileştirme organizasyon ayarlarında kapalı');
+    if (settings.selfHealing.emergencyStop) throw precondition('Kendini iyileştirme acil durdurması etkin');
+    const [recent] = await this.ctx.db.select({ n: count() }).from(aiRemediations).where(and(eq(aiRemediations.organizationId, auth.organizationId), gte(aiRemediations.createdAt, new Date(Date.now() - 3600_000))));
+    if ((recent?.n ?? 0) >= settings.selfHealing.maxAttemptsPerHour) throw precondition(`Saatlik iyileştirme sınırı doldu (${settings.selfHealing.maxAttemptsPerHour})`);
+    const row = await this.ctx.db.transaction(async (tx) => {
+      const attempt = (await tx.select({ n: count() }).from(aiRemediations).where(eq(aiRemediations.incidentId, i.id)))[0]?.n ?? 0;
+      const remediation = (
+        await tx
+          .insert(aiRemediations)
+          .values({ organizationId: auth.organizationId, projectId: i.projectId, incidentId: i.id, action: 'recheck_health', riskLevel: 'low', trigger: 'manual', diagnosis: 'İzleme olayı için değişiklik yapmadan HTTP sağlık kontrolünü tekrar çalıştır.', attempt: attempt + 1, requestedBy: auth.user.id })
+          .returning()
+      )[0]!;
+      await enqueue(tx, { queue: QUEUES.ai, type: 'ai.remediation.run', organizationId: auth.organizationId, projectId: i.projectId, maxAttempts: 1, dedupeKey: `remediation:${remediation.id}`, payload: { remediationId: remediation.id } });
+      await audit(tx, { organizationId: auth.organizationId, projectId: i.projectId, actor, action: 'ai.remediation.requested', resourceType: 'ai_remediation', resourceId: remediation.id, metadata: { incidentId: i.id, action: remediation.action, risk: remediation.riskLevel } });
+      return remediation;
+    });
+    return row;
   }
 
   async openIncident(auth: AuthInfo, idOrSlug: string, input: { title: string; severity: 'critical' | 'high' | 'medium' | 'low'; environmentId?: string | null }, actor: Actor) {
@@ -327,7 +355,7 @@ export class MiscService {
   async draftPostmortem(auth: AuthInfo, incidentId: string) {
     const detail = await this.incident(auth, incidentId);
     await this.access.require(auth, detail.projectId, 'ai.execute');
-    const resolved = await ai.resolveAi(this.ctx.db, this.ctx.config, auth.organizationId, { minLevel: 'L1' });
+    const resolved = await ai.resolveAi(this.ctx.db, this.ctx.config, auth.organizationId, { minLevel: 'L1', projectId: detail.projectId });
     await ai.assertBudget(this.ctx.db, auth.organizationId, resolved.settings);
     const run = await ai.startRun(this.ctx.db, { organizationId: auth.organizationId, projectId: detail.projectId, purpose: 'postmortem', provider: resolved.provider, userId: auth.user.id });
     try {

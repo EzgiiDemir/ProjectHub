@@ -8,7 +8,7 @@ import {
   projectListQuerySchema,
   updateProjectSchema,
 } from '@projecthub/contracts';
-import { AppError, type Actor } from '@projecthub/core';
+import { AppError, PROJECT_TEMPLATES, type Actor } from '@projecthub/core';
 import type { AuthInfo } from '../../infra/context.js';
 import { assertUuid, Auth, CurrentActor, parse, RequirePermission } from '../../infra/http.js';
 import { ProjectsService } from './projects.service.js';
@@ -20,6 +20,12 @@ export class ProjectsController {
     private readonly projects: ProjectsService,
     private readonly uploads: UploadsService,
   ) {}
+
+  /** Starter templates offered by the project wizard (spec §129). */
+  @Get('project-templates')
+  templates() {
+    return Object.values(PROJECT_TEMPLATES).map(({ files: _files, ...t }) => t);
+  }
 
   @Get('projects')
   list(@Auth() a: AuthInfo, @Query() q: unknown) {

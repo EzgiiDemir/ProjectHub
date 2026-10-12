@@ -57,10 +57,17 @@ export function parseDependencies(files: Map<string, string>): Dependency[] {
 
   const composerLock = files.get('composer.lock');
   if (composerLock) {
+    const directComposer = new Set<string>();
+    try {
+      const cj = JSON.parse(files.get('composer.json') ?? '{}') as { require?: Record<string, string>; 'require-dev'?: Record<string, string> };
+      for (const n of [...Object.keys(cj.require ?? {}), ...Object.keys(cj['require-dev'] ?? {})]) directComposer.add(n.toLowerCase());
+    } catch {
+      /* ignore */
+    }
     try {
       const c = JSON.parse(composerLock) as { packages?: { name: string; version: string }[]; 'packages-dev'?: { name: string; version: string }[] };
       for (const p of [...(c.packages ?? []), ...(c['packages-dev'] ?? [])]) {
-        add({ name: p.name, version: p.version.replace(/^v/, ''), ecosystem: 'Packagist', source: 'composer.lock', approximate: false, direct: false });
+        add({ name: p.name, version: p.version.replace(/^v/, ''), ecosystem: 'Packagist', source: 'composer.lock', approximate: false, direct: directComposer.has(p.name.toLowerCase()) });
       }
     } catch {
       /* ignore */
@@ -187,24 +194,62 @@ interface OsvVuln {
   references?: { url: string }[];
 }
 
+export interface InventoryItem extends Dependency {
+  /** Newest stable release on the package registry (direct dependencies only), null when unknown. */
+  latest: string | null;
+}
+
 export interface DependencyScanResult {
   findings: RawFinding[];
   packagesScanned: number;
   notes: string[];
+  inventory: InventoryItem[];
 }
+
+/** Package registry base URLs used to look up the latest release. An empty/missing URL skips that ecosystem. */
+export interface PackageRegistries {
+  npm?: string;
+  pypi?: string;
+  packagist?: string;
+}
+
+export const dependencyKey = (d: { ecosystem: string; name: string }) => `${d.ecosystem}|${d.name.toLowerCase()}`;
 
 export async function scanDependencies(
   deps: Dependency[],
-  opts: { osvUrl: string; fetchImpl?: typeof fetch; timeoutMs?: number; checkOutdated?: boolean; registryUrl?: string },
+  opts: { osvUrl: string; fetchImpl?: typeof fetch; timeoutMs?: number; registries?: PackageRegistries },
 ): Promise<DependencyScanResult> {
   const notes: string[] = [];
   const findings: RawFinding[] = [];
-  if (!deps.length) return { findings, packagesScanned: 0, notes };
+  if (!deps.length) return { findings, packagesScanned: 0, notes, inventory: [] };
   if (deps.some((d) => d.approximate)) notes.push('Lock dosyası olmadığı için bazı paketler sürüm aralığının alt sınırıyla tarandı.');
-  if (!opts.osvUrl) {
-    notes.push('Çevrimiçi bağımlılık taraması kapalı (OSV_API_URL boş).');
-    return { findings, packagesScanned: 0, notes };
+  let packagesScanned = 0;
+  if (!opts.osvUrl) notes.push('Çevrimiçi bağımlılık taraması kapalı (OSV_API_URL boş).');
+  else if (await osvFindings(deps, opts, findings, notes)) packagesScanned = deps.length;
+
+  const latest = opts.registries ? await latestVersions(deps.filter((d) => d.direct), opts.registries, opts.fetchImpl ?? fetch) : new Map<string, string>();
+  for (const d of deps) {
+    const l = latest.get(dependencyKey(d));
+    if (!l || updateType(d.version, l) !== 'major') continue;
+    const behind = Number(l.split('.')[0]) - Number(d.version.split('.')[0]);
+    findings.push({
+      type: 'dependency',
+      severity: 'info',
+      ruleId: 'dependency/outdated-major',
+      title: `${d.name} güncel değil (${d.version} → ${l})`,
+      description: `${d.name} için ${behind} ana sürüm geride. Ana sürüm geçişleri kırıcı değişiklik içerebilir; değişiklik notlarını inceleyin.`,
+      filePath: d.source,
+      packageName: d.name,
+      packageVersion: d.version,
+      fixedVersion: l,
+      identity: d.ecosystem === 'npm' ? `outdated|${d.name}` : `outdated|${d.ecosystem}|${d.name}`,
+    });
   }
+  return { findings, packagesScanned, notes, inventory: deps.map((d) => ({ ...d, latest: latest.get(dependencyKey(d)) ?? null })) };
+}
+
+/** OSV lookup; returns false when the vulnerability database could not be reached. */
+async function osvFindings(deps: Dependency[], opts: { osvUrl: string; fetchImpl?: typeof fetch; timeoutMs?: number }, findings: RawFinding[], notes: string[]): Promise<boolean> {
   const f = opts.fetchImpl ?? fetch;
   const timeout = opts.timeoutMs ?? 20_000;
   const vulnIdsByDep = new Map<number, string[]>();
@@ -225,7 +270,7 @@ export async function scanDependencies(
     }
   } catch (e) {
     notes.push(`Zafiyet veritabanına (OSV) ulaşılamadı: ${(e as Error).message}. Bağımlılık zafiyetleri bu taramada kontrol edilemedi.`);
-    return { findings, packagesScanned: 0, notes };
+    return false;
   }
 
   const ids = [...new Set([...vulnIdsByDep.values()].flat())].slice(0, 300);
@@ -272,38 +317,47 @@ export async function scanDependencies(
       });
     }
   }
+  return true;
+}
 
-  if (opts.checkOutdated) {
-    const direct = deps.filter((d) => d.ecosystem === 'npm' && d.direct).slice(0, 80);
-    const registry = (opts.registryUrl ?? 'https://registry.npmjs.org').replace(/\/$/, '');
-    await mapLimit(direct, 6, async (d) => {
-      try {
-        const res = await f(`${registry}/${d.name.replace('/', '%2f')}/latest`, { signal: AbortSignal.timeout(8_000) });
-        if (!res.ok) return;
-        const latest = ((await res.json()) as { version?: string }).version;
-        if (!latest) return;
-        const cur = Number(d.version.split('.')[0]);
-        const lat = Number(latest.split('.')[0]);
-        if (Number.isFinite(cur) && Number.isFinite(lat) && lat > cur) {
-          findings.push({
-            type: 'dependency',
-            severity: 'info',
-            ruleId: 'dependency/outdated-major',
-            title: `${d.name} güncel değil (${d.version} → ${latest})`,
-            description: `${d.name} için ${lat - cur} ana sürüm geride. Ana sürüm geçişleri kırıcı değişiklik içerebilir; değişiklik notlarını inceleyin.`,
-            filePath: d.source,
-            packageName: d.name,
-            packageVersion: d.version,
-            fixedVersion: latest,
-            identity: `outdated|${d.name}`,
-          });
+/** "major" | "minor" | "patch" when `latest` is newer than `current`, otherwise null. */
+export function updateType(current: string, latest: string): 'major' | 'minor' | 'patch' | null {
+  if (compareVersions(latest, current) <= 0) return null;
+  const [a, b] = [current, latest].map((v) => v.replace(/^v/, '').split(/[.-]/).map(Number));
+  if (a![0] !== b![0]) return 'major';
+  if ((a![1] ?? 0) !== (b![1] ?? 0)) return 'minor';
+  return 'patch';
+}
+
+const STABLE = (v: string) => !/(dev|alpha|beta|rc|preview|a\d|b\d)/i.test(v);
+
+/** Latest stable release per package from npm, PyPI and Packagist (other ecosystems are skipped). */
+export async function latestVersions(deps: Dependency[], reg: PackageRegistries, f: typeof fetch = fetch, timeoutMs = 8_000): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Map(deps.map((d) => [dependencyKey(d), d])).values()].slice(0, 150);
+  const base = (u: string | undefined) => (u ? u.replace(/\/$/, '') : '');
+  await mapLimit(unique, 6, async (d) => {
+    try {
+      let version: string | undefined;
+      if (d.ecosystem === 'npm' && base(reg.npm)) {
+        const res = await f(`${base(reg.npm)}/${d.name.replace('/', '%2f')}/latest`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (res.ok) version = ((await res.json()) as { version?: string }).version;
+      } else if (d.ecosystem === 'PyPI' && base(reg.pypi)) {
+        const res = await f(`${base(reg.pypi)}/pypi/${encodeURIComponent(d.name)}/json`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (res.ok) version = ((await res.json()) as { info?: { version?: string } }).info?.version;
+      } else if (d.ecosystem === 'Packagist' && base(reg.packagist)) {
+        const res = await f(`${base(reg.packagist)}/p2/${d.name}.json`, { signal: AbortSignal.timeout(timeoutMs) });
+        if (res.ok) {
+          const list = ((await res.json()) as { packages?: Record<string, { version: string }[]> }).packages?.[d.name] ?? [];
+          version = list.map((x) => x.version.replace(/^v/, '')).filter(STABLE).sort(compareVersions).at(-1);
         }
-      } catch {
-        /* registry hiccups are not findings */
       }
-    });
-  }
-  return { findings, packagesScanned: deps.length, notes };
+      if (version && STABLE(version)) out.set(dependencyKey(d), version.replace(/^v/, ''));
+    } catch {
+      /* registry hiccups only mean "latest unknown" */
+    }
+  });
+  return out;
 }
 
 function osvSeverity(v: OsvVuln | undefined, dep: Dependency): Severity {

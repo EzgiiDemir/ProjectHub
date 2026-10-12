@@ -6,6 +6,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  real,
   text,
   uniqueIndex,
   uuid,
@@ -23,7 +24,7 @@ import { organizations, users } from './identity.js';
 import { projects } from './projects.js';
 
 export interface AiCitation {
-  type: 'file' | 'build' | 'deployment' | 'feedback' | 'finding' | 'commit' | 'doc';
+  type: 'file' | 'build' | 'deployment' | 'feedback' | 'finding' | 'commit' | 'doc' | 'memory';
   ref: string;
   label: string;
   line?: number;
@@ -197,6 +198,9 @@ export const codeChunks = pgTable(
     startLine: integer().notNull(),
     endLine: integer().notNull(),
     content: text().notNull(),
+    /** Locally generated semantic vector. PostgreSQL arrays keep this feature pgvector-independent. */
+    embedding: real().array(),
+    embeddingModel: varchar({ length: 150 }),
     searchVector: tsvector().generatedAlwaysAs(
       // Index the raw text plus a copy with camelCase / path separators split, so "CheckoutButton.tsx" matches "checkout button".
       sql`to_tsvector('simple', path || ' ' || content || ' ' || regexp_replace(path || ' ' || content, '([a-z])([A-Z])|[_./\\-]', '\\1 \\2', 'g'))`,
@@ -205,5 +209,42 @@ export const codeChunks = pgTable(
   (t) => [
     index('code_chunks_project_path_idx').on(t.projectId, t.path),
     index('code_chunks_search_idx').using('gin', t.searchVector),
+  ],
+);
+
+/** Durable, human-inspectable project knowledge. Source code itself remains in code_chunks, not duplicated here. */
+export const aiMemories = pgTable(
+  'ai_memories',
+  {
+    id: pk(),
+    organizationId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid()
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    category: varchar({ length: 30 }).notNull(),
+    title: varchar({ length: 200 }).notNull(),
+    content: text().notNull(),
+    verification: varchar({ length: 20 }).notNull().default('inferred'),
+    sourceType: varchar({ length: 30 }).notNull(),
+    sourceRef: varchar({ length: 500 }),
+    sourceLabel: varchar({ length: 300 }),
+    createdByType: varchar({ length: 20 }).notNull().default('system'),
+    createdBy: uuid().references(() => users.id, { onDelete: 'set null' }),
+    approvedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
+    searchVector: tsvector().generatedAlwaysAs(
+      sql`to_tsvector('simple', title || ' ' || content || ' ' || coalesce(source_label, ''))`,
+    ),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index('ai_memories_project_updated_idx').on(t.projectId, t.updatedAt),
+    index('ai_memories_search_idx').using('gin', t.searchVector),
+    uniqueIndex('ai_memories_source_uq').on(t.projectId, t.sourceType, t.sourceRef),
+    check('ai_memories_category_ck', oneOf('category', ['architecture', 'decision', 'convention', 'bug', 'task_outcome', 'fact'])),
+    check('ai_memories_verification_ck', oneOf('verification', ['verified', 'inferred', 'historical'])),
+    check('ai_memories_created_by_type_ck', oneOf('created_by_type', ['user', 'ai', 'system'])),
   ],
 );

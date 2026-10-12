@@ -268,3 +268,72 @@ export const backups = pgTable(
     check('backups_status_ck', oneOf('status', ['running', 'completed', 'failed'])),
   ],
 );
+
+/**
+ * Database migrations of managed projects, detected when versions are created (spec §44, §52).
+ * One row per migration file; `migrationRuns` records in which environment it was applied by which deployment.
+ */
+export const projectMigrations = pgTable(
+  'project_migrations',
+  {
+    id: pk(),
+    projectId: uuid()
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    path: varchar({ length: 500 }).notNull(),
+    name: varchar({ length: 300 }).notNull(),
+    checksum: varchar({ length: 64 }).notNull(),
+    riskLevel: varchar({ length: 10 }).notNull(),
+    operations: jsonb().$type<string[]>().notNull().default([]),
+    firstVersionId: uuid().references(() => versions.id, { onDelete: 'set null' }),
+    detectedAt: createdAt(),
+  },
+  (t) => [uniqueIndex('project_migrations_path_uq').on(t.projectId, t.path), check('project_migrations_risk_ck', oneOf('risk_level', ['low', 'medium', 'high']))],
+);
+
+export const migrationRuns = pgTable(
+  'migration_runs',
+  {
+    id: pk(),
+    migrationId: uuid()
+      .notNull()
+      .references(() => projectMigrations.id, { onDelete: 'cascade' }),
+    environmentId: uuid()
+      .notNull()
+      .references(() => environments.id, { onDelete: 'cascade' }),
+    deploymentId: uuid().references(() => deployments.id, { onDelete: 'set null' }),
+    appliedAt: createdAt(),
+  },
+  (t) => [uniqueIndex('migration_runs_env_uq').on(t.migrationId, t.environmentId)],
+);
+
+/** Restoring a backup into an environment. Production restores need a second person's approval (spec §53). */
+export const backupRestores = pgTable(
+  'backup_restores',
+  {
+    id: pk(),
+    organizationId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid()
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    backupId: uuid()
+      .notNull()
+      .references(() => backups.id, { onDelete: 'cascade' }),
+    environmentId: uuid()
+      .notNull()
+      .references(() => environments.id, { onDelete: 'cascade' }),
+    status: varchar({ length: 20 }).notNull().default('pending_approval'),
+    requestedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
+    approvedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
+    error: text(),
+    log: text(),
+    createdAt: createdAt(),
+    finishedAt: ts(),
+  },
+  (t) => [
+    index('backup_restores_project_idx').on(t.projectId, t.createdAt),
+    check('backup_restores_status_ck', oneOf('status', ['pending_approval', 'queued', 'running', 'completed', 'failed', 'rejected'])),
+  ],
+);

@@ -2,6 +2,7 @@ import {
   bigint,
   boolean,
   check,
+  date,
   index,
   integer,
   jsonb,
@@ -149,6 +150,9 @@ export const tasks = pgTable(
     branch: varchar({ length: 200 }),
     createdBy: uuid().references(() => users.id, { onDelete: 'set null' }),
     completedAt: ts(),
+    /** Planned completion date (team board), YYYY-MM-DD. */
+    dueDate: date({ mode: 'string' }),
+    labels: jsonb().$type<string[]>().notNull().default([]),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

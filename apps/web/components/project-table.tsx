@@ -68,7 +68,7 @@ export function ProjectTable({ archive }: { archive: boolean }) {
             </>
           )}
         </div>
-        <input className="in" style={{ maxWidth: 320 }} placeholder={archive ? 'Örn. Laravel ödeme, müşteri adı…' : 'Proje, müşteri veya teknoloji ara'} value={search} onChange={(e) => setSearch(e.target.value)} />
+        <input className="in" style={{ maxWidth: 320 }} placeholder={archive ? 'Örn. Laravel ödeme, kullanıcı adı…' : 'Proje, kullanıcı veya teknoloji ara'} value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
       <div className="panel flush">
         <Async q={projects}>
@@ -82,7 +82,7 @@ export function ProjectTable({ archive }: { archive: boolean }) {
                       <th>Proje</th>
                       <th>Tür</th>
                       <th>Kaynak</th>
-                      <th>Müşteri / birim</th>
+                      <th>Kullanıcı / birim</th>
                       <th>Sahip</th>
                       <th>Sürüm</th>
                       <th>Durum</th>

@@ -6,7 +6,8 @@ import { useToast } from '@/components/toast';
 
 /** Which cached queries become stale when a realtime event arrives. */
 const INVALIDATES: Record<string, string[]> = {
-  'build.updated': ['builds', 'build', 'overview', 'home'],
+  'build.updated': ['builds', 'build', 'overview', 'home', 'pullRequest'],
+  'pull_request.updated': ['pullRequests', 'pullRequest'],
   'preview.updated': ['previews', 'build', 'overview', 'home'],
   timeline: ['timeline', 'overview'],
   'project.updated': ['project', 'projects', 'overview', 'manifest', 'home'],

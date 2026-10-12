@@ -95,10 +95,23 @@ export type FindingStatus = (typeof FINDING_STATUSES)[number];
 export const AI_AUTONOMY_LEVELS = ['L0', 'L1', 'L2', 'L3'] as const;
 export type AiAutonomyLevel = (typeof AI_AUTONOMY_LEVELS)[number];
 
-export const AI_PROVIDERS = ['openai', 'anthropic'] as const;
+/** `ollama` is the self-hosted, keyless default. Cloud providers remain optional compatibility adapters. */
+export const AI_PROVIDERS = ['ollama', 'openai', 'anthropic'] as const;
 export type AiProviderName = (typeof AI_PROVIDERS)[number];
 
-export const AI_TASK_TYPES = ['fix', 'feedback_triage', 'build_analysis', 'security_explain', 'docs'] as const;
+export const AI_TASK_TYPES = [
+  'fix',
+  'feedback_triage',
+  'build_analysis',
+  'security_explain',
+  'docs',
+  'test_generation',
+  'architecture_review',
+  'impact_analysis',
+  'database_review',
+  'deployment_review',
+  'project_plan',
+] as const;
 export type AiTaskType = (typeof AI_TASK_TYPES)[number];
 
 export const AI_TASK_STATUSES = [
@@ -147,6 +160,9 @@ export const DOMAIN_EVENTS = [
   'project.created',
   'project.archived',
   'repository.pushed',
+  'pull_request.opened',
+  'pull_request.reviewed',
+  'pull_request.merged',
   'build.completed',
   'build.failed',
   'preview.ready',
@@ -162,5 +178,16 @@ export const DOMAIN_EVENTS = [
   'security.finding.critical',
   'incident.opened',
   'incident.resolved',
+  'task.assigned',
+  'task.commented',
+  'project.mentioned',
 ] as const;
 export type DomainEvent = (typeof DOMAIN_EVENTS)[number];
+
+/** Notification categories users can tune per channel (Hesabım > Bildirimler). */
+export const NOTIFICATION_CATEGORIES = ['code', 'build', 'deployment', 'feedback', 'ai', 'security', 'incident', 'team'] as const;
+export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
+
+/** Starter templates for new projects (spec §129); the files live in @projecthub/core/templates. */
+export const PROJECT_TEMPLATE_IDS = ['static', 'node-api', 'react-spa', 'nextjs-postgres', 'laravel', 'fastapi', 'custom'] as const;
+export type ProjectTemplateId = (typeof PROJECT_TEMPLATE_IDS)[number];

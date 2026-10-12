@@ -62,7 +62,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       scan: ['Güvenlik taraması', '/security'],
       tara: ['Güvenlik taraması', '/security'],
       preview: ['Ön izlemeler', '/previews'],
-      review: ['Müşteri linkleri', '/reviews'],
+      review: ['Kullanıcı linkleri', '/reviews'],
       feedback: ['Geri bildirimler', '/feedback'],
       ai: ['Proje AI\'ya sor', '/ai'],
       sor: ['Proje AI\'ya sor', '/ai'],

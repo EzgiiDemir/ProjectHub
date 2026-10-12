@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
-import { audit, forbidden, invalid, isSha, notFound, timeline, type Actor, type FileChange } from '@projecthub/core';
+import { audit, forbidden, invalid, isProtectedBranch, isSha, notFound, timeline, type Actor, type FileChange } from '@projecthub/core';
 import { repositories } from '@projecthub/database';
 import { Ctx, type AuthInfo } from '../../infra/context.js';
 import { ProjectAccess } from '../../infra/project-access.js';
@@ -144,6 +144,9 @@ export class RepositoryService {
       // AI branches belong to their AI task; humans review/merge them rather than editing in place.
       throw forbidden('ai/ ile başlayan branch\'ler AI görevlerine aittir; değişiklik için kendi branch\'inizi açın');
     }
+    if (isProtectedBranch(scope.project.settings, input.branch)) {
+      throw forbidden(`"${input.branch}" korumalı bir branch; değişikliği yeni bir branch'e commit edip pull request açın`);
+    }
     const sha = await git.commitChanges({
       branch: input.branch,
       baseCommit: input.baseCommit,
@@ -187,6 +190,7 @@ export class RepositoryService {
   async deleteBranch(auth: AuthInfo, idOrSlug: string, name: string, actor: Actor) {
     const { scope, git } = await this.open(auth, idOrSlug, 'repository.push');
     if (name === scope.project.defaultBranch) throw forbidden('Varsayılan branch silinemez');
+    if (isProtectedBranch(scope.project.settings, name)) throw forbidden(`"${name}" korumalı bir branch; silinemez`);
     const sha = await git.resolve(`refs/heads/${name}`);
     if (!sha) throw notFound('Branch');
     await git.deleteBranch(name, sha);
@@ -196,6 +200,7 @@ export class RepositoryService {
   async merge(auth: AuthInfo, idOrSlug: string, input: { source: string; target: string; message?: string }, actor: Actor) {
     const { scope, git, repo } = await this.open(auth, idOrSlug, 'repository.push');
     if (input.source === input.target) throw invalid('Kaynak ve hedef branch aynı olamaz');
+    if (isProtectedBranch(scope.project.settings, input.target)) throw forbidden(`"${input.target}" korumalı; birleştirme pull request üzerinden yapılır`);
     if (input.source.startsWith('ai/')) throw forbidden('AI branch\'leri AI görevi ekranından onaylanarak birleştirilir');
     const result = await git.merge({
       source: input.source,

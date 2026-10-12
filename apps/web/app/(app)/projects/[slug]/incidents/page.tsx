@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bot, Plus } from 'lucide-react';
+import { Bot, Plus, RefreshCw } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api, errorMessage } from '@/lib/api';
@@ -12,7 +12,11 @@ import type { Environment, Incident, ProjectEvent } from '@/lib/types';
 import { Async, Drawer, Empty, Field, KeyValue, Markdown, Modal, Panel, StatusBadge, Tabs } from '@/components/ui';
 import { useToast } from '@/components/toast';
 
-type IncidentDetail = Incident & { timeline: ProjectEvent[]; healthChecks: { id: string; ok: boolean; httpStatus: number | null; latencyMs: number | null; error: string | null; checkedAt: string }[] };
+type IncidentDetail = Incident & {
+  timeline: ProjectEvent[];
+  healthChecks: { id: string; ok: boolean; httpStatus: number | null; latencyMs: number | null; error: string | null; checkedAt: string }[];
+  remediations: { id: string; action: string; trigger: string; status: string; diagnosis: string | null; result: { recovered?: boolean; httpStatus?: number; latencyMs?: number; error?: string } | null; attempt: number; createdAt: string }[];
+};
 
 const SOURCE: Record<string, string> = { monitor: 'Sağlık izleme', deployment: 'Deployment', manual: 'Elle açıldı' };
 
@@ -125,6 +129,14 @@ function IncidentDrawer({ id, canManage, canAi, onClose }: { id: string; canMana
     },
     onError: (e) => toast(errorMessage(e), 'bad'),
   });
+  const remediate = useMutation({
+    mutationFn: () => api(`/incidents/${id}/remediations`, { method: 'POST' }),
+    onSuccess: () => {
+      toast('Düşük riskli sağlık kontrolü sıraya alındı');
+      void qc.invalidateQueries({ queryKey: ['incident', id] });
+    },
+    onError: (e) => toast(errorMessage(e), 'bad'),
+  });
   return (
     <Drawer title={q.data ? `${q.data.key} · ${q.data.title}` : 'Olay'} onClose={onClose} wide>
       <Async q={q}>
@@ -168,7 +180,27 @@ function IncidentDrawer({ id, canManage, canAi, onClose }: { id: string; canMana
                         Yeniden aç
                       </button>
                     )}
+                    {canAi && i.status === 'open' && i.source === 'monitor' && (
+                      <button className="btn" onClick={() => remediate.mutate()} disabled={remediate.isPending} title="Ayar ve acil durdurma politikası sunucuda yeniden doğrulanır">
+                        {remediate.isPending ? <span className="spinner" /> : <RefreshCw />} Kontrollü sağlık kontrolü
+                      </button>
+                    )}
                   </div>
+                )}
+                {i.remediations.length > 0 && (
+                  <>
+                    <h3 style={{ margin: '18px 0 8px' }}>Kontrollü iyileştirme geçmişi</h3>
+                    {i.remediations.map((r) => (
+                      <div className="list-item" key={r.id}>
+                        <StatusBadge status={r.status} />
+                        <div style={{ flex: 1 }}>
+                          <div className="small">Sağlık kontrolü · {r.trigger === 'automatic' ? 'otomatik' : 'elle'} · deneme {r.attempt}</div>
+                          <div className="small muted">{r.diagnosis}{r.result ? ` · ${r.result.recovered ? 'erişim düzeldi' : 'erişim hâlâ başarısız'}${r.result.httpStatus ? ` · HTTP ${r.result.httpStatus}` : ''}` : ''}</div>
+                        </div>
+                        <span className="small muted">{ago(r.createdAt)}</span>
+                      </div>
+                    ))}
+                  </>
                 )}
                 {i.healthChecks.length > 0 && (
                   <>

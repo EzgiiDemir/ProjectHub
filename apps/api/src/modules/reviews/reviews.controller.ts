@@ -44,34 +44,34 @@ export class ReviewsController {
 
   @Get('reviews/:reviewId')
   get(@Auth() a: AuthInfo, @Param('reviewId') reviewId: string) {
-    return this.reviews.get(a, assertUuid(reviewId, 'Müşteri linki'));
+    return this.reviews.get(a, assertUuid(reviewId, 'Kullanıcı linki'));
   }
 
   @Post('reviews/:reviewId/revoke')
   revoke(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('reviewId') reviewId: string) {
-    return this.reviews.revoke(a, assertUuid(reviewId, 'Müşteri linki'), actor);
+    return this.reviews.revoke(a, assertUuid(reviewId, 'Kullanıcı linki'), actor);
   }
 
   @Post('reviews/:reviewId/extend')
   extend(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('reviewId') reviewId: string, @Body() body: unknown) {
     const { hours } = parse(z.object({ hours: z.number().int().min(1).max(24 * 30) }), body);
-    return this.reviews.extend(a, assertUuid(reviewId, 'Müşteri linki'), hours, actor);
+    return this.reviews.extend(a, assertUuid(reviewId, 'Kullanıcı linki'), hours, actor);
   }
 
   @Post('reviews/:reviewId/switch-preview')
   switchPreview(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('reviewId') reviewId: string, @Body() body: unknown) {
     const { previewId } = parse(z.object({ previewId: z.uuid() }), body);
-    return this.reviews.switchPreview(a, assertUuid(reviewId, 'Müşteri linki'), previewId, actor);
+    return this.reviews.switchPreview(a, assertUuid(reviewId, 'Kullanıcı linki'), previewId, actor);
   }
 
   @Get('reviews/:reviewId/messages')
   messages(@Auth() a: AuthInfo, @Param('reviewId') reviewId: string) {
-    return this.reviews.messages(a, assertUuid(reviewId, 'Müşteri linki'));
+    return this.reviews.messages(a, assertUuid(reviewId, 'Kullanıcı linki'));
   }
 
   @Post('reviews/:reviewId/messages')
   reply(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('reviewId') reviewId: string, @Body() body: unknown) {
-    return this.reviews.reply(a, assertUuid(reviewId, 'Müşteri linki'), parse(chatMessageSchema, body).body, actor);
+    return this.reviews.reply(a, assertUuid(reviewId, 'Kullanıcı linki'), parse(chatMessageSchema, body).body, actor);
   }
 
   /* feedback */

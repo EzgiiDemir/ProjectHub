@@ -1,10 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import { durationToMinutes, type Manifest, type StepStatus } from '@projecthub/contracts';
 import {
   audit,
   copyDir,
+  DeferJobError,
   detectProject,
   dirSize,
   emitDomainEvent,
@@ -13,6 +14,7 @@ import {
   GitRepository,
   manifestFromDetection,
   MANIFEST_FILE,
+  moveDir,
   parseManifest,
   PermanentJobError,
   previewSlug,
@@ -23,10 +25,19 @@ import {
   timeline,
   type JobContext,
 } from '@projecthub/core';
-import { artifacts, builds, buildSteps, previews, projectManifests, users, type Executor } from '@projecthub/database';
+import { artifacts, builds, buildSteps, previews, projectManifests, users, workerHeartbeats, type Executor } from '@projecthub/database';
 import { commitSnapshot, loadProject, openRepo, type WorkerCtx } from '../context.js';
 import { extractError } from '../runner/errors.js';
-import { BuildLog, runCommand, sanitizedEnv } from '../runner/process.js';
+import {
+  BuildLog,
+  listManagedBuildContainers,
+  removeManagedBuildContainer,
+  runCommand,
+  runContainerCommand,
+  runtimeEnv,
+  sanitizedEnv,
+} from '../runner/process.js';
+import { registerPeriodic } from './maintenance.js';
 import { runSecurityScan } from './security.js';
 
 type StepKey = 'checkout' | 'manifest' | 'install' | 'security' | 'build' | 'test' | 'artifact';
@@ -58,8 +69,47 @@ export async function executeBuild(ctx: WorkerCtx, { job, logger, signal }: JobC
   if (!build) throw new PermanentJobError('build not found');
   if (build.status !== 'queued' && build.status !== 'running') return { skipped: build.status };
   const project = await loadProject(ctx, build.projectId);
+  if ((project.settings as { executionTrust?: string }).executionTrust === 'untrusted') {
+    const message = 'Güvenilmeyen proje için host üzerinde build komutu çalıştırılması engellendi';
+    await db.transaction(async (tx) => {
+      await tx.update(builds).set({ status: 'failed', error: { step: 'Güvenlik ilkesi', message }, finishedAt: new Date() }).where(eq(builds.id, build.id));
+      await audit(tx, {
+        organizationId: project.organizationId,
+        projectId: project.id,
+        actor: SYSTEM_ACTOR,
+        action: 'build.blocked_untrusted_source',
+        resourceType: 'build',
+        resourceId: build.id,
+        metadata: { executionTrust: 'untrusted' },
+      });
+      await timeline(tx, {
+        organizationId: project.organizationId,
+        projectId: project.id,
+        kind: 'build',
+        tone: 'bad',
+        title: `Build #${build.number} güvenlik ilkesiyle engellendi`,
+        description: message,
+        refType: 'build',
+        refId: build.id,
+      });
+    });
+    await publish(db, { type: 'build.updated', organizationId: project.organizationId, projectId: project.id, id: build.id });
+    return { status: 'failed', blocked: true };
+  }
   const { git } = await openRepo(ctx, project.id);
   const settings = await getOrgSettings(db, project.organizationId);
+  if (build.status === 'queued') {
+    // Admin > Saklama ve kapasite: organization-wide cap on simultaneous builds (the 8 GB server guard).
+    // The advisory lock makes "count running + claim" atomic across worker processes.
+    const claimed = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`builds:${project.organizationId}`}))`);
+      const running = await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM builds WHERE organization_id = ${project.organizationId} AND status = 'running'`);
+      if ((running.rows[0]?.n ?? 0) >= settings.retention.maxConcurrentBuilds) return false;
+      await tx.update(builds).set({ status: 'running', startedAt: new Date() }).where(eq(builds.id, build.id));
+      return true;
+    });
+    if (!claimed) throw new DeferJobError(`Eşzamanlı build sınırı (${settings.retention.maxConcurrentBuilds}) dolu; build sırada bekliyor`, 10_000);
+  }
 
   const logKey = ctx.storage.buildLogKey(project.id, build.id);
   await ctx.storage.ensureDir(path.dirname(logKey));
@@ -104,8 +154,27 @@ export async function executeBuild(ctx: WorkerCtx, { job, logger, signal }: JobC
 
   const run = async (key: StepKey, command: string, env: NodeJS.ProcessEnv, timeoutMs: number) => {
     await setStep(key, 'running');
-    log.section(`${STEP_NAMES[key]}: ${command}`);
-    const r = await runCommand({ command, cwd: workspace, env, timeoutMs, onOutput: (t) => log.write(t), isCancelled, signal });
+    const containerized = ctx.config.BUILD_EXECUTOR === 'container';
+    log.section(`${STEP_NAMES[key]}${containerized ? ' (ephemeral container)' : ''}: ${command}`);
+    const common = { command, cwd: workspace, env, timeoutMs, onOutput: (t: string) => log.write(t), isCancelled, signal };
+    const r = containerized
+      ? await runContainerCommand({
+          ...common,
+          limits: {
+            image: ctx.config.BUILD_CONTAINER_IMAGE,
+            cpus: ctx.config.BUILD_CONTAINER_CPUS,
+            memoryMb: ctx.config.BUILD_CONTAINER_MEMORY_MB,
+            pids: ctx.config.BUILD_CONTAINER_PIDS,
+            // Only dependency installation receives egress. Build/test code executes without a network.
+            network: key === 'install' ? 'bridge' : 'none',
+          },
+          labels: {
+            'com.projecthub.managed': 'build',
+            'com.projecthub.worker': ctx.workerId,
+            'com.projecthub.build': build.id,
+          },
+        })
+      : await runCommand(common);
     log.flush();
     if (r.cancelled) {
       cancelled = true;
@@ -140,7 +209,7 @@ export async function executeBuild(ctx: WorkerCtx, { job, logger, signal }: JobC
     await setStep('manifest', 'passed', { summary: `${manifest.runtime.type}${manifest.runtime.version ? ` ${manifest.runtime.version}` : ''} · kaynak: ${resolved.source}` });
 
     const secrets = await resolveEnvSecrets(db, ctx.config.encryptionKey, { organizationId: project.organizationId, projectId: project.id, environmentId: null, scope: 'build' });
-    const env = sanitizedEnv({ ...secrets, PROJECTHUB_BUILD: String(build.number), PROJECTHUB_COMMIT: build.commitSha, PROJECTHUB_BRANCH: build.branch });
+    const env = sanitizedEnv({ ...runtimeEnv(manifest.runtime?.type), ...secrets, PROJECTHUB_BUILD: String(build.number), PROJECTHUB_COMMIT: build.commitSha, PROJECTHUB_BRANCH: build.branch });
     const timeoutMs = Math.min(manifest.build?.timeoutMinutes ?? 20, ctx.config.BUILD_TIMEOUT_MINUTES) * 60_000;
 
     // 3. install
@@ -178,9 +247,8 @@ export async function executeBuild(ctx: WorkerCtx, { job, logger, signal }: JobC
     let outputKind: 'static' | 'process';
     if (wantsProcess && manifest.start?.command) {
       // Server apps run from the complete workspace (dependencies included).
-      await fs.rename(workspace, artifactDir).catch(async () => {
-        await copyDir(workspace, artifactDir);
-      });
+      // moveDir re-points links into the old workspace (Turbopack server externals) at the artifact.
+      await moveDir(workspace, artifactDir);
       outputKind = 'process';
     } else {
       const out = manifest.build?.output ?? '.';
@@ -277,6 +345,29 @@ export async function executeBuild(ctx: WorkerCtx, { job, logger, signal }: JobC
 }
 
 class StepFailed extends Error {}
+
+registerPeriodic({
+  name: 'reconcile-build-containers',
+  everyMinutes: 1,
+  run: async (ctx) => {
+    if (ctx.config.BUILD_EXECUTOR !== 'container') return 0;
+    const containers = await listManagedBuildContainers();
+    if (!containers.length) return 0;
+    const activeWorkerRows = await ctx.db
+      .select({ id: workerHeartbeats.workerId })
+      .from(workerHeartbeats)
+      .where(and(inArray(workerHeartbeats.workerId, [...new Set(containers.map((item) => item.workerId))]), gt(workerHeartbeats.lastSeenAt, new Date(Date.now() - 45_000))));
+    const buildRows = await ctx.db
+      .select({ id: builds.id, status: builds.status })
+      .from(builds)
+      .where(inArray(builds.id, [...new Set(containers.map((item) => item.buildId))]));
+    const activeWorkers = new Set(activeWorkerRows.map((row) => row.id));
+    const runningBuilds = new Set(buildRows.filter((row) => row.status === 'running').map((row) => row.id));
+    const orphaned = containers.filter((item) => !activeWorkers.has(item.workerId) || !runningBuilds.has(item.buildId));
+    await Promise.all(orphaned.map((item) => removeManagedBuildContainer(item.id)));
+    return orphaned.length;
+  },
+});
 
 /** Creates a preview for a successful build (called inside the build's finishing transaction). */
 export async function createPreviewFor(

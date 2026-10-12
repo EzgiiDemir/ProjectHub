@@ -6,3 +6,5 @@ export * from './deploy.js';
 export * from './security.js';
 export * from './ai.js';
 export * from './ops.js';
+export * from './collab.js';
+export * from './team.js';

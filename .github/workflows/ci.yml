@@ -1,0 +1,71 @@
+# Continuous integration: type-checks every package, runs the unit and integration suites against a real
+# PostgreSQL 18 (the same engine as production) and builds the web app for production.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: projecthub
+          POSTGRES_PASSWORD: projecthub-ci
+          POSTGRES_DB: projecthub_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U projecthub -d projecthub_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://projecthub:projecthub-ci@127.0.0.1:5432/projecthub_test
+      # Backup/restore tests need a client of the same major version as the server.
+      PG_DUMP_BINARY: /usr/lib/postgresql/18/bin/pg_dump
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable pnpm (corepack, version from package.json)
+        run: corepack enable
+
+      - name: PostgreSQL 18 client (pg_dump / pg_restore)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -q
+          sudo apt-get install -yq postgresql-client-18
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Git identity for repository tests
+        run: |
+          git config --global user.name "Project Hub CI"
+          git config --global user.email "ci@projecthub.local"
+
+      - name: Type-check (server packages and web)
+        run: pnpm run typecheck
+
+      - name: Unit and integration tests
+        run: pnpm test
+
+      - name: Production web build
+        run: pnpm --filter @projecthub/web run build

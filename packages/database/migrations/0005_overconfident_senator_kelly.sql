@@ -1,0 +1,2 @@
+ALTER TABLE "ai_tasks" DROP CONSTRAINT "ai_tasks_type_ck";--> statement-breakpoint
+ALTER TABLE "ai_tasks" ADD CONSTRAINT "ai_tasks_type_ck" CHECK (type IN ('fix', 'feedback_triage', 'build_analysis', 'security_explain', 'docs', 'test_generation', 'architecture_review', 'impact_analysis', 'database_review', 'deployment_review', 'project_plan'));

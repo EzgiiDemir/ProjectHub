@@ -30,7 +30,7 @@ export default function PreviewsPage() {
       <div className="spread" style={{ marginBottom: 12 }}>
         <div>
           <h2 style={{ margin: 0 }}>Ön izlemeler</h2>
-          <p className="sub">Başarılı build&apos;lerden oluşturulan, süreli ve izole çalışan sürümler. Müşteri linkleri bu ön izlemeleri kullanır.</p>
+          <p className="sub">Başarılı build&apos;lerden oluşturulan, süreli ve izole çalışan sürümler. Kullanıcı linkleri bu ön izlemeleri kullanır.</p>
         </div>
         {canCreate && (
           <button className="btn pri" onClick={() => setCreating(true)}>
@@ -161,7 +161,7 @@ function PreviewDrawer({ preview: p, slug, canManage, onClose }: { preview: Prev
         )}
         {p.status === 'ready' && (
           <Link className="btn" href={`/projects/${slug}/reviews?new=1&preview=${p.id}`}>
-            Müşteriye gönder
+            Kullanıcıya gönder
           </Link>
         )}
       </div>

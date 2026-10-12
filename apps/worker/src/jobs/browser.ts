@@ -31,20 +31,22 @@ let browser: Browser | null = null;
 let idleTimer: NodeJS.Timeout | null = null;
 
 /** One shared headless Chromium, closed after 5 idle minutes to give the RAM back on the 8 GB server. */
-async function getBrowser(): Promise<Browser> {
+export async function getBrowser(): Promise<Browser> {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
     void browser?.close();
     browser = null;
   }, 5 * 60_000);
-  if (!browser || !browser.isConnected()) browser = await chromium.launch({ args: ['--disable-dev-shm-usage'] });
+  // Software rendering only: screenshots must not depend on the host GPU (a hung or busy GPU, e.g. one shared with
+  // local AI inference, would otherwise stall every browser job).
+  if (!browser || !browser.isConnected()) browser = await chromium.launch({ args: ['--disable-dev-shm-usage', '--disable-gpu', '--use-angle=swiftshader'] });
   return browser;
 }
 registerLifecycle({ stop: async () => void (await browser?.close()) });
 
-type Device = { width: number; height: number; scaleFactor: number; isMobile: boolean; userAgent: string | null };
+export type Device = { width: number; height: number; scaleFactor: number; isMobile: boolean; userAgent: string | null };
 
-async function previewContext(ctx: WorkerCtx, pv: typeof previews.$inferSelect, device: Device): Promise<{ context: BrowserContext; base: string }> {
+export async function previewContext(ctx: WorkerCtx, pv: typeof previews.$inferSelect, device: Device): Promise<{ context: BrowserContext; base: string }> {
   if (!ctx.config.BROWSER_AUTOMATION) throw new PermanentJobError('Tarayıcı otomasyonu kapalı (BROWSER_AUTOMATION=false)');
   const b = await getBrowser();
   const context = await b.newContext({

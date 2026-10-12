@@ -34,9 +34,33 @@ const configSchema = z.object({
   COOKIE_SECURE: bool,
   BUILD_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(1),
   BUILD_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(180).default(20),
+  /** Optional defense-in-depth runner for trusted builds. Untrusted sources remain blocked. */
+  BUILD_EXECUTOR: z.enum(['host', 'container']).default('host'),
+  BUILD_CONTAINER_IMAGE: z.string().min(1).default('node:22-bookworm-slim'),
+  BUILD_CONTAINER_CPUS: z.coerce.number().positive().max(16).default(2),
+  BUILD_CONTAINER_MEMORY_MB: z.coerce.number().int().min(256).max(32768).default(2048),
+  BUILD_CONTAINER_PIDS: z.coerce.number().int().min(32).max(4096).default(256),
   OPENAI_API_KEY: z.string().optional().default(''),
   ANTHROPIC_API_KEY: z.string().optional().default(''),
+  /** Self-hosted Ollama runtime. It is never given an external provider key. */
+  OLLAMA_BASE_URL: z.url().default('http://127.0.0.1:11434'),
+  OLLAMA_MODEL: z.string().min(1).default('qwen2.5-coder:7b'),
+  /** Optional local embedding model. Empty keeps the PostgreSQL full-text fallback only. */
+  OLLAMA_EMBEDDING_MODEL: z.string().optional().default(''),
+  OLLAMA_REQUEST_TIMEOUT_SECONDS: z.coerce.number().int().min(5).max(3600).default(300),
+  /**
+   * Context window requested from Ollama on every call (num_ctx). Ollama's own default depends on its version and
+   * free VRAM and can be as small as 2–4k tokens, which silently truncates the system prompt and tool definitions.
+   */
+  OLLAMA_CONTEXT_TOKENS: z.coerce.number().int().min(2048).max(262_144).default(16_384),
+  /** Optional API gateway / proxy in front of the provider (corporate LLM gateways). Empty = provider default. */
+  ANTHROPIC_BASE_URL: z.string().optional().default(''),
+  OPENAI_BASE_URL: z.string().optional().default(''),
   OSV_API_URL: z.string().optional().default(''),
+  /** Package registries for latest-release lookups of direct dependencies (opt-in via .env; empty = skip, e.g. offline installs). */
+  NPM_REGISTRY_URL: z.string().optional().default(''),
+  PYPI_URL: z.string().optional().default(''),
+  PACKAGIST_URL: z.string().optional().default(''),
   BROWSER_AUTOMATION: bool,
   SMTP_HOST: z.string().optional().default(''),
   SMTP_PORT: z.coerce.number().int().default(587),

@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import { desc, eq } from 'drizzle-orm';
+import type { ProjectTemplateId } from '@projecthub/contracts';
 import {
   audit,
   detectProject,
@@ -9,6 +10,7 @@ import {
   MANIFEST_FILE,
   parseManifest,
   PermanentJobError,
+  PROJECT_TEMPLATES,
   publish,
   QUEUES,
   readSecret,
@@ -25,6 +27,8 @@ interface ProvisionPayload {
   branch: string | null;
   uploadId: string | null;
   requestedBy: string | null;
+  /** Starter template for empty projects (spec §129). */
+  template?: ProjectTemplateId | null;
 }
 
 /** Creates the hub-managed repository for a new project (empty, imported from Git, or from an upload). */
@@ -62,8 +66,12 @@ export async function provisionRepository(ctx: WorkerCtx, { job, logger }: JobCo
       await ctx.storage.remove(upload.storageKey);
     } else {
       git = await GitRepository.initBare(dir, branch, ctx.config.GIT_BINARY);
-      const readme = `# ${project.name}\n\n${project.description || 'Proje açıklaması.'}\n`;
-      await git.commitChanges({ branch, baseCommit: null, message: 'Initial commit', author, changes: [{ action: 'upsert', path: 'README.md', content: readme }] });
+      const template = p.template ? PROJECT_TEMPLATES[p.template] : null;
+      const files = template
+        ? template.files({ name: project.name, slug: project.slug })
+        : { 'README.md': `# ${project.name}\n\n${project.description || 'Proje açıklaması.'}\n` };
+      const changes = Object.entries(files).map(([path, content]) => ({ action: 'upsert' as const, path, content }));
+      await git.commitChanges({ branch, baseCommit: null, message: template ? `Initial commit (${template.name} şablonu)` : 'Initial commit', author, changes });
     }
     const head = (await git.resolve(`refs/heads/${branch}`))!;
     const size = await git.sizeBytes();
@@ -168,27 +176,33 @@ export async function syncJob(ctx: WorkerCtx, { job }: JobContext) {
   const project = await loadProject(ctx, projectId);
   const { git, repo } = await openRepo(ctx, projectId);
   if (!repo.upstreamUrl) throw new PermanentJobError('upstream yok');
-  const before = await git.refSnapshot();
   const token = repo.upstreamSecretId ? await readSecret(ctx.db, ctx.config.encryptionKey, repo.upstreamSecretId) : undefined;
+  let report: Awaited<ReturnType<typeof git.syncFromUpstream>>;
   try {
-    await git.syncFromUpstream(repo.upstreamUrl, token);
+    report = await git.syncFromUpstream(repo.upstreamUrl, token);
   } catch (e) {
     await timeline(ctx.db, { organizationId: project.organizationId, projectId, kind: 'commit', tone: 'bad', title: 'Kaynak senkronizasyonu başarısız', description: sanitizeGitError((e as Error).message) });
     throw e;
   }
-  const after = await git.refSnapshot();
-  const changed = [...after].filter(([ref, sha]) => before.get(ref) !== sha && ref.startsWith('refs/heads/'));
-  const head = after.get(`refs/heads/${project.defaultBranch}`) ?? null;
+  const changed = [...report.created, ...report.updated];
+  const head = await git.resolve(`refs/heads/${project.defaultBranch}`);
   await ctx.db.update(repositories).set({ headCommit: head, sizeBytes: await git.sizeBytes(), lastPushedAt: changed.length ? new Date() : repo.lastPushedAt }).where(eq(repositories.id, repo.id));
   await timeline(ctx.db, {
     organizationId: project.organizationId,
     projectId,
     kind: 'commit',
-    tone: 'ok',
-    title: changed.length ? `Kaynaktan ${changed.length} branch güncellendi` : 'Kaynak zaten güncel',
-    description: changed.map(([ref, sha]) => `${ref.replace('refs/heads/', '')} → ${sha.slice(0, 7)}`).join(', '),
+    tone: report.diverged.length ? 'warn' : 'ok',
+    title: changed.length ? `Kaynaktan ${changed.length} branch güncellendi` : report.diverged.length ? 'Kaynak senkronizasyonu: ayrışan branch var' : 'Kaynak zaten güncel',
+    description: [
+      report.created.length ? `Yeni: ${report.created.join(', ')}` : '',
+      report.updated.length ? `İleri sarıldı: ${report.updated.join(', ')}` : '',
+      report.diverged.length ? `Ayrıştı, dokunulmadı: ${report.diverged.join(', ')} (Project Hub'daki commit'ler korunuyor; birleştirmeyi Git istemcisiyle yapın)` : '',
+      report.tags.length ? `Yeni etiket: ${report.tags.join(', ')}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · '),
   });
-  if (changed.some(([ref]) => ref === `refs/heads/${project.defaultBranch}`)) {
+  if (changed.includes(project.defaultBranch)) {
     await enqueue(ctx.db, { queue: QUEUES.ai, type: 'code.index', projectId, organizationId: project.organizationId, dedupeKey: `index:${projectId}`, payload: { projectId, branch: project.defaultBranch } });
     await enqueue(ctx.db, { queue: QUEUES.security, type: 'security.scan', projectId, organizationId: project.organizationId, dedupeKey: `scan:${projectId}`, payload: { projectId, branch: project.defaultBranch, trigger: 'sync' } });
   }

@@ -15,6 +15,48 @@
       "when": 1791374249229,
       "tag": "0001_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791459749740,
+      "tag": "0002_collaboration_ops",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791467614747,
+      "tag": "0003_lonely_anita_blake",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791468022611,
+      "tag": "0004_heavy_lady_ursula",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791529053946,
+      "tag": "0005_overconfident_senator_kelly",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791534581494,
+      "tag": "0006_public_meltdown",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791535292220,
+      "tag": "0007_team_integrations",
+      "breakpoints": true
     }
   ]
 }

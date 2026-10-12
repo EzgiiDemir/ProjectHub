@@ -3,13 +3,15 @@ import { aiSettingsSchema, retentionSettingsSchema, type AiSettings, type Retent
 import { organizations, type Executor } from '@projecthub/database';
 
 export const DEFAULT_AI_SETTINGS: AiSettings = {
-  provider: null,
+  provider: 'ollama',
   model: null,
   // Spec: start at L2 — AI suggests and prepares changes on its own branch, humans approve.
   autonomyLevel: 'L2',
   monthlyTokenBudget: 5_000_000,
   maxAgentSteps: 30,
   policies: { createBranch: true, commitToAiBranch: true, runBuilds: true, createPreview: true },
+  // Automatic remediation is opt-in and starts behind an emergency stop.
+  selfHealing: { enabled: false, emergencyStop: true, autoRecheckHealth: false, maxAttemptsPerHour: 2 },
 };
 
 /** Defaults sized for the initial 8 GB RAM / 200 GB disk server. */

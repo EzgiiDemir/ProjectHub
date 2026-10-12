@@ -147,11 +147,59 @@ export class GitRepository {
   }
 
   /** Re-synchronises all branches from the upstream the project was imported from. */
-  async syncFromUpstream(url: string, token?: string): Promise<void> {
+  /**
+   * Brings branches and tags from the original upstream without ever losing hub-side work:
+   * upstream refs land in a staging namespace, then local branches are only created or fast-forwarded.
+   * Branches that diverged (commits made in the hub, or upstream history rewritten) are left untouched
+   * and reported; hub-only branches (hotfix/, ai/ …) are never pruned.
+   */
+  async syncFromUpstream(url: string, token?: string): Promise<{ created: string[]; updated: string[]; diverged: string[]; tags: string[] }> {
     const args: string[] = [];
     if (token) args.push('-c', `http.extraHeader=Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`);
-    args.push('fetch', '--prune', url, '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*');
-    await this.run(args, { timeoutMs: 10 * 60_000, env: { GIT_TERMINAL_PROMPT: '0' } });
+    const staging = 'refs/projecthub-upstream';
+    const clearStaging = async () => {
+      const deletes = (await this.run(['for-each-ref', '--format=delete %(refname)', `${staging}/`])).stdout.toString('utf8');
+      if (deletes.trim()) await this.run(['update-ref', '--stdin'], { input: deletes });
+    };
+    await clearStaging();
+    args.push('fetch', '--no-tags', url, `+refs/heads/*:${staging}/heads/*`, `+refs/tags/*:${staging}/tags/*`);
+    try {
+      await this.run(args, { timeoutMs: 10 * 60_000, env: { GIT_TERMINAL_PROMPT: '0' } });
+      return await this.applyStagedUpstream(staging);
+    } finally {
+      await clearStaging();
+    }
+  }
+
+  private async applyStagedUpstream(staging: string) {
+    const report = { created: [] as string[], updated: [] as string[], diverged: [] as string[], tags: [] as string[] };
+    const list = (prefix: string) =>
+      this.text(['for-each-ref', '--format=%(refname)%00%(objectname)', prefix]).then((out) =>
+        out
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => l.split('\0') as [string, string]),
+      );
+    for (const [ref, sha] of await list(`${staging}/heads/`)) {
+      const name = ref.slice(`${staging}/heads/`.length);
+      const local = await this.resolve(`refs/heads/${name}`);
+      if (local === sha) continue;
+      if (!local) {
+        await this.updateRef(name, sha, null);
+        report.created.push(name);
+      } else if (await this.isAncestor(local, sha)) {
+        await this.updateRef(name, sha, local);
+        report.updated.push(name);
+      } else if (!(await this.isAncestor(sha, local))) {
+        report.diverged.push(name);
+      }
+    }
+    for (const [ref, sha] of await list(`${staging}/tags/`)) {
+      const name = ref.slice(`${staging}/tags/`.length);
+      const r = await this.run(['update-ref', `refs/tags/${name}`, sha, ZERO_OID], { allowExitCodes: [0, 1, 128] });
+      if (r.code === 0) report.tags.push(name);
+    }
+    return report;
   }
 
   async isEmpty(): Promise<boolean> {
@@ -437,6 +485,44 @@ export class GitRepository {
     const env = { GIT_COMMITTER_NAME: author.name, GIT_COMMITTER_EMAIL: author.email };
     const r = await this.run(['tag', '-a', name, sha, '-m', message], { env, allowExitCodes: [0, 128] });
     if (r.code !== 0) throw conflict(`Etiket oluşturulamadı: ${name} (${r.stderr.trim()})`);
+  }
+
+  /** Would merging `source` into `target` succeed? Writes no refs (merge-tree only creates unreachable objects). */
+  async mergeCheck(source: string, target: string): Promise<{ upToDate: boolean; fastForward: boolean; conflicts: string[] }> {
+    const sourceSha = await this.resolveOrThrow(`refs/heads/${source}`);
+    const targetSha = await this.resolveOrThrow(`refs/heads/${target}`);
+    if (sourceSha === targetSha || (await this.isAncestor(sourceSha, targetSha))) return { upToDate: true, fastForward: false, conflicts: [] };
+    if (await this.isAncestor(targetSha, sourceSha)) return { upToDate: false, fastForward: true, conflicts: [] };
+    const r = await this.run(['merge-tree', '--write-tree', '--name-only', '--no-messages', targetSha, sourceSha], { allowExitCodes: [0, 1] });
+    const lines = r.stdout.toString('utf8').split('\n').filter(Boolean);
+    return { upToDate: false, fastForward: false, conflicts: r.code === 1 ? lines.slice(1) : [] };
+  }
+
+  /**
+   * Installs the pre-receive hook that enforces branch protection for pushes over HTTPS. The protected
+   * branch names reach the hook through PH_PROTECTED_REFS, set per request by the Git HTTP endpoint.
+   */
+  async ensureProtectionHook(): Promise<void> {
+    const file = path.join(this.dir, 'hooks', 'pre-receive');
+    const script = [
+      '#!/bin/sh',
+      '# Installed by Project Hub: protected branches only change through pull requests.',
+      '[ -z "$PH_PROTECTED_REFS" ] && exit 0',
+      'while read old new ref; do',
+      '  for p in $PH_PROTECTED_REFS; do',
+      '    if [ "$ref" = "refs/heads/$p" ]; then',
+      `      echo "Project Hub: '$p' korumali bir branch; degisiklikleri pull request ile birlestirin." >&2`,
+      '      exit 1',
+      '    fi',
+      '  done',
+      'done',
+      'exit 0',
+      '',
+    ].join('\n');
+    const current = await fs.readFile(file, 'utf8').catch(() => '');
+    if (current === script) return;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, script, { mode: 0o755 });
   }
 
   /**

@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { and, asc, count, desc, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { FindingStatus, SecretKind, SecretScope, Severity } from '@projecthub/contracts';
-import { audit, enqueue, forbidden, notFound, publish, putSecret, QUEUES, readSecret, scan, type Actor } from '@projecthub/core';
+import { audit, enqueue, forbidden, notFound, precondition, publish, putSecret, QUEUES, readSecret, scan, type Actor } from '@projecthub/core';
 import { environments, projects, secrets, securityFindings, securityScans, users } from '@projecthub/database';
 import { Ctx, type AuthInfo } from '../../infra/context.js';
 import { ProjectAccess } from '../../infra/project-access.js';
@@ -76,7 +76,7 @@ export class SecurityService {
   async projectSecurity(auth: AuthInfo, idOrSlug: string, q: { status?: string; severity?: string; type?: string }) {
     const scope = await this.access.require(auth, idOrSlug, 'security.read');
     const conds: SQL[] = [eq(securityFindings.projectId, scope.project.id)];
-    conds.push(eq(securityFindings.status, (q.status ?? 'open') as FindingStatus));
+    if (q.status !== 'all') conds.push(eq(securityFindings.status, (q.status ?? 'open') as FindingStatus));
     if (q.severity) conds.push(eq(securityFindings.severity, q.severity as Severity));
     if (q.type) conds.push(eq(securityFindings.type, q.type as never));
     const findings = await this.ctx.db.select().from(securityFindings).where(and(...conds)).orderBy(SEVERITY_ORDER, desc(securityFindings.lastSeenAt)).limit(500);
@@ -128,6 +128,35 @@ export class SecurityService {
     await enqueue(this.ctx.db, { queue: QUEUES.maintenance, type: 'project.health', projectId: f.projectId, organizationId: auth.organizationId, dedupeKey: `health:${f.projectId}`, payload: { projectId: f.projectId } });
     await publish(this.ctx.db, { type: 'security.scan', organizationId: auth.organizationId, projectId: f.projectId });
     return { ...f, status: input.status, key: `SEC-${f.number}` };
+  }
+
+  /**
+   * "Çözüldü": marks the finding resolved and immediately scans the default branch again. The scanner reopens a
+   * resolved finding it still sees, so the verification result is objective (see `verification`).
+   */
+  async resolveAndVerify(auth: AuthInfo, findingId: string, note: string | undefined, actor: Actor) {
+    const f = (await this.ctx.db.select().from(securityFindings).where(and(eq(securityFindings.id, findingId), eq(securityFindings.organizationId, auth.organizationId))))[0];
+    if (!f) throw notFound('Bulgu');
+    if (f.status === 'resolved') throw precondition('Bulgu zaten çözüldü olarak işaretli');
+    await this.updateFinding(auth, f.id, { status: 'resolved', reason: note?.trim() || undefined }, actor);
+    const scan = await this.startScan(auth, f.projectId, actor);
+    return { scanId: scan.id };
+  }
+
+  /** Result of the verification scan started by `resolveAndVerify`. */
+  async verification(auth: AuthInfo, findingId: string, scanId: string) {
+    const f = (await this.ctx.db.select().from(securityFindings).where(and(eq(securityFindings.id, findingId), eq(securityFindings.organizationId, auth.organizationId))))[0];
+    if (!f) throw notFound('Bulgu');
+    await this.access.require(auth, f.projectId, 'security.read');
+    const s = (await this.ctx.db.select().from(securityScans).where(and(eq(securityScans.id, scanId), eq(securityScans.projectId, f.projectId))))[0];
+    if (!s) throw notFound('Tarama');
+    const finding = { status: f.status, lastSeenAt: f.lastSeenAt };
+    if (s.status === 'queued' || s.status === 'running') return { state: 'pending' as const, message: 'Doğrulama taraması sürüyor…', finding };
+    if (s.status === 'failed') return { state: 'unverifiable' as const, message: `Doğrulama taraması başarısız: ${s.error ?? 'bilinmeyen hata'}`, finding };
+    if (f.status === 'open') return { state: 'still_present' as const, message: `Sorun ${s.commitSha?.slice(0, 7) ?? 'son'} commit'inde hâlâ mevcut; bulgu yeniden açıldı.`, finding };
+    const depUnchecked = f.type === 'dependency' && (s.summary?.notes ?? []).some((n) => n.includes('ulaşılamadı') || n.includes('kapalı'));
+    if (depUnchecked) return { state: 'unverifiable' as const, message: 'Zafiyet veritabanına ulaşılamadığı için bu tarama bağımlılığı kontrol edemedi.', finding };
+    return { state: 'verified' as const, message: `Doğrulandı: ${s.branch} branch'inin ${s.commitSha?.slice(0, 7) ?? 'son'} commit'inde sorun bulunamadı.`, finding };
   }
 
   /** Organization-wide Security Center (spec §24). Only projects the caller can see. */

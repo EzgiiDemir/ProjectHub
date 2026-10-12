@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import fs from 'node:fs';
 import { and, asc, count, desc, eq, inArray, ne, sql } from 'drizzle-orm';
-import type { DeployAdapter, EnvironmentType } from '@projecthub/contracts';
+import type { DeployAdapter, DeploymentWindow, EnvironmentType } from '@projecthub/contracts';
 import {
   audit,
   conflict,
+  deploymentWindowDecision,
   emitDomainEvent,
   enqueue,
   forbidden,
@@ -19,12 +20,14 @@ import {
   putSecret,
   QUEUES,
   scan,
+  sha256,
   timeline,
   type Actor,
 } from '@projecthub/core';
 import {
   artifacts,
   backups,
+  projectMigrations,
   builds,
   databaseConnections,
   deploymentApprovals,
@@ -226,6 +229,14 @@ export class DeployService {
       )[0]!;
       // Release artifacts are kept indefinitely (spec §49).
       await tx.update(artifacts).set({ type: 'release', retentionUntil: null }).where(eq(artifacts.id, b.artifactId!));
+      // Migration registry (spec §44): first version that brought each migration, with a content checksum.
+      for (const m of migrations) {
+        const file = await git.readFile(b.commitSha, m.path, 2 * 1024 * 1024);
+        await tx
+          .insert(projectMigrations)
+          .values({ projectId: scope.project.id, path: m.path, name: m.name, checksum: sha256(file?.content ?? Buffer.alloc(0)), riskLevel: m.risk, operations: m.operations, firstVersionId: v.id })
+          .onConflictDoNothing();
+      }
       await audit(tx, { organizationId: auth.organizationId, projectId: scope.project.id, actor, action: 'version.created', resourceType: 'version', resourceId: v.id, metadata: { version: input.version, build: b.number, migrations: migrations.length } });
       await timeline(tx, {
         organizationId: auth.organizationId,
@@ -315,6 +326,21 @@ export class DeployService {
    * Spec §44–45 + policy engine §106: validates permissions and policies, then either waits for approvals
    * or queues the durable deployment workflow. Returns immediately (202-style); progress streams via SSE.
    */
+  async deploymentWindow(auth: AuthInfo, idOrSlug: string) {
+    const scope = await this.access.require(auth, idOrSlug);
+    const decision = deploymentWindowDecision(scope.project.settings, 'production');
+    return { window: (scope.project.settings as { deploymentWindow?: DeploymentWindow }).deploymentWindow ?? null, productionNow: decision.status, canEdit: scope.can('project.update') };
+  }
+
+  async setDeploymentWindow(auth: AuthInfo, idOrSlug: string, input: DeploymentWindow, actor: Actor) {
+    const scope = await this.access.requireWritable(auth, idOrSlug, 'project.update');
+    // jsonb_set touches only this key, so concurrent writers of other settings stay intact.
+    await this.ctx.db.execute(sql`UPDATE projects SET settings = jsonb_set(settings, '{deploymentWindow}', ${JSON.stringify(input)}::jsonb), updated_at = now() WHERE id = ${scope.project.id}`);
+    await audit(this.ctx.db, { organizationId: auth.organizationId, projectId: scope.project.id, actor, action: 'deployment.window_changed', resourceType: 'project', resourceId: scope.project.id, metadata: input });
+    await publish(this.ctx.db, { type: 'project.updated', organizationId: auth.organizationId, projectId: scope.project.id });
+    return this.deploymentWindow(auth, scope.project.id);
+  }
+
   async create(auth: AuthInfo, idOrSlug: string, input: { environmentId: string; versionId: string; runMigrations: boolean; backup: boolean; overrideSecurityPolicy: boolean; overrideReason?: string }, actor: Actor, opts: { isRollback?: boolean } = {}) {
     const scope = await this.access.requireWritable(auth, idOrSlug, 'project.read');
     const env = await this.envOf(scope, input.environmentId);
@@ -346,7 +372,11 @@ export class DeployService {
       }
     }
 
-    const needsApproval = env.requiresApproval;
+    // Deployment window policy (spec §25: "after 22:00 a deployment needs a manager's approval").
+    const window = deploymentWindowDecision(scope.project.settings, env.type, { isRollback: opts.isRollback });
+    if (window.status === 'outside' && window.action === 'deny') throw policyDenied(window.message, { deploymentWindow: true });
+    const outsideWindow = window.status === 'outside' ? window.message : null;
+    const needsApproval = env.requiresApproval || !!outsideWindow;
     const row = await this.ctx.db.transaction(async (tx) => {
       const number = await nextNumber(tx, auth.organizationId, 'deployment');
       const previous = env.currentDeploymentId;
@@ -379,7 +409,7 @@ export class DeployService {
         action: opts.isRollback ? 'deployment.rollback_requested' : 'deployment.requested',
         resourceType: 'deployment',
         resourceId: d.id,
-        metadata: { environment: env.name, version: v.version, policyOverride },
+        metadata: { environment: env.name, version: v.version, policyOverride, ...(outsideWindow ? { deploymentWindow: outsideWindow } : {}) },
       });
       if (policyOverride) {
         await audit(tx, { organizationId: auth.organizationId, projectId: scope.project.id, actor, action: 'security.policy_override', resourceType: 'deployment', resourceId: d.id, metadata: policyOverride });
@@ -390,7 +420,7 @@ export class DeployService {
         kind: 'deploy',
         tone: needsApproval ? 'warn' : 'run',
         title: `${opts.isRollback ? 'Geri alma' : 'Deployment'} D-${number}: v${v.version} → ${env.name}`,
-        description: needsApproval ? `${env.requiredApprovals} onay bekleniyor` : 'Kuyruğa alındı',
+        description: needsApproval ? `${outsideWindow ? 'Zaman penceresi dışında · ' : ''}${env.requiredApprovals} onay bekleniyor` : 'Kuyruğa alındı',
         actorLabel: actor.label,
         refType: 'deployment',
         refId: d.id,

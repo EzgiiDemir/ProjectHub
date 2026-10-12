@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import { OPEN_FEEDBACK_STATUSES, type AiSettings } from '@projecthub/contracts';
 import {
   aiRuns,
+  aiMemories,
   builds,
   codeChunks,
   deployments,
@@ -18,13 +19,16 @@ import {
 } from '@projecthub/database';
 import type { AppConfig } from '../config.js';
 import { AppError } from '../errors.js';
+import { latestManifest } from '../project-manifest.js';
 import { getOrgSettings } from '../settings.js';
 import { AnthropicProvider, DEFAULT_ANTHROPIC_MODEL } from './anthropic.js';
 import { OpenAiProvider } from './openai.js';
+import { getOllamaRuntimeStatus, OllamaEmbeddingClient, OllamaProvider } from './ollama.js';
 import type { AiProvider, AiToolDef, AiToolResult, AiUsage } from './provider.js';
 
 export * from './provider.js';
-export { AnthropicProvider, OpenAiProvider, DEFAULT_ANTHROPIC_MODEL };
+export type { OllamaRuntimeStatus } from './ollama.js';
+export { AnthropicProvider, OpenAiProvider, OllamaEmbeddingClient, OllamaProvider, getOllamaRuntimeStatus, DEFAULT_ANTHROPIC_MODEL };
 
 export interface ResolvedAi {
   provider: AiProvider;
@@ -33,33 +37,55 @@ export interface ResolvedAi {
 
 /** Which providers have credentials (keys only come from the server environment, never from the database). */
 export function availableProviders(config: AppConfig) {
-  return { anthropic: !!config.ANTHROPIC_API_KEY, openai: !!config.OPENAI_API_KEY };
+  return { ollama: !!config.OLLAMA_BASE_URL, anthropic: !!config.ANTHROPIC_API_KEY, openai: !!config.OPENAI_API_KEY };
+}
+
+export interface SemanticEmbedding {
+  model: string;
+  embed(input: string[], signal?: AbortSignal): Promise<number[][]>;
+}
+
+/** Returns the optional local-only semantic index client. Empty config deliberately keeps lexical fallback. */
+export function localEmbedding(config: AppConfig): SemanticEmbedding | undefined {
+  return config.OLLAMA_EMBEDDING_MODEL
+    ? new OllamaEmbeddingClient(config.OLLAMA_BASE_URL, config.OLLAMA_EMBEDDING_MODEL, config.OLLAMA_REQUEST_TIMEOUT_SECONDS * 1000)
+    : undefined;
 }
 
 /**
  * Resolves the AI provider for an organization from Admin > AI settings + server credentials.
  * Throws AI_NOT_CONFIGURED with an actionable message when AI cannot run.
  */
-export async function resolveAi(db: Executor, config: AppConfig, organizationId: string, opts: { minLevel?: 'L1' | 'L2' | 'L3' } = {}): Promise<ResolvedAi> {
-  const { ai } = await getOrgSettings(db, organizationId);
-  if (ai.autonomyLevel === 'L0') throw new AppError('AI_NOT_CONFIGURED', 'AI bu organizasyonda kapalı (otonomi seviyesi L0). Yönetim > AI kontrol merkezinden açılabilir.');
+export async function resolveAi(db: Executor, config: AppConfig, organizationId: string, opts: { minLevel?: 'L1' | 'L2' | 'L3'; projectId?: string } = {}): Promise<ResolvedAi> {
+  const { ai: orgAi } = await getOrgSettings(db, organizationId);
+  if (orgAi.autonomyLevel === 'L0') throw new AppError('AI_NOT_CONFIGURED', 'AI bu organizasyonda kapalı (otonomi seviyesi L0). Yönetim > AI kontrol merkezinden açılabilir.');
   const order = ['L0', 'L1', 'L2', 'L3'];
+  // projecthub.yml `ai.autonomy` can only lower the organization's level for one project, never raise it.
+  let ai = orgAi;
+  if (opts.projectId) {
+    const cap = (await latestManifest(db, opts.projectId))?.ai.autonomy;
+    if (cap && order.indexOf(cap) < order.indexOf(orgAi.autonomyLevel)) ai = { ...orgAi, autonomyLevel: cap };
+    if (ai.autonomyLevel === 'L0') throw new AppError('POLICY_DENIED', 'Bu projede AI kapalı (projecthub.yml: ai.autonomy L0).');
+  }
   if (opts.minLevel && order.indexOf(ai.autonomyLevel) < order.indexOf(opts.minLevel)) {
     throw new AppError('POLICY_DENIED', `Bu işlem için AI otonomi seviyesi en az ${opts.minLevel} olmalı (şu an ${ai.autonomyLevel}).`);
   }
   const keys = availableProviders(config);
-  const name = ai.provider ?? (keys.anthropic ? 'anthropic' : keys.openai ? 'openai' : null);
+  const name = ai.provider ?? 'ollama';
   if (!name || !keys[name]) {
     throw new AppError(
       'AI_NOT_CONFIGURED',
       name
-        ? `${name === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'} sunucu ortamında tanımlı değil. Sistem yöneticisi .env dosyasına ekleyip servisleri yeniden başlatmalı.`
-        : 'AI sağlayıcısı yapılandırılmamış. Sunucuya ANTHROPIC_API_KEY veya OPENAI_API_KEY ekleyin ve Yönetim > AI kontrol merkezinden sağlayıcıyı seçin.',
+        ? `${name === 'anthropic' ? 'ANTHROPIC_API_KEY' : name === 'openai' ? 'OPENAI_API_KEY' : 'OLLAMA_BASE_URL'} sunucu ortamında tanımlı değil. Sistem yöneticisi .env dosyasını güncelleyip servisleri yeniden başlatmalı.`
+        : 'AI sağlayıcısı yapılandırılmamış.',
     );
   }
-  if (name === 'anthropic') return { provider: new AnthropicProvider(config.ANTHROPIC_API_KEY, ai.model ?? DEFAULT_ANTHROPIC_MODEL), settings: ai };
+  if (name === 'ollama') {
+    return { provider: new OllamaProvider(config.OLLAMA_BASE_URL, ai.model ?? config.OLLAMA_MODEL, config.OLLAMA_REQUEST_TIMEOUT_SECONDS * 1000, config.OLLAMA_CONTEXT_TOKENS), settings: ai };
+  }
+  if (name === 'anthropic') return { provider: new AnthropicProvider(config.ANTHROPIC_API_KEY, ai.model ?? DEFAULT_ANTHROPIC_MODEL, config.ANTHROPIC_BASE_URL || undefined), settings: ai };
   if (!ai.model) throw new AppError('AI_NOT_CONFIGURED', 'OpenAI için model adı seçilmemiş. Yönetim > AI kontrol merkezinden model belirleyin.');
-  return { provider: new OpenAiProvider(config.OPENAI_API_KEY, ai.model), settings: ai };
+  return { provider: new OpenAiProvider(config.OPENAI_API_KEY, ai.model, config.OPENAI_BASE_URL || undefined), settings: ai };
 }
 
 export async function monthlyTokenUsage(db: Executor, organizationId: string): Promise<number> {
@@ -135,7 +161,12 @@ export async function runToolAgent(opts: {
   onAction?: (name: string, input: unknown, outcome: { ok: boolean; risk: string; output: string }) => Promise<void>;
 }): Promise<AgentOutcome> {
   const usage: AiUsage = { inputTokens: 0, outputTokens: 0 };
-  const convo = opts.provider.agent({ system: opts.system, tools: Object.values(opts.tools).map((t) => t.def), signal: opts.signal });
+  const convo = opts.provider.agent({
+    system: opts.system,
+    tools: Object.values(opts.tools).map((t) => t.def),
+    maxTokens: Math.min(opts.tokenLimit, 4_096),
+    signal: opts.signal,
+  });
   let turn = await convo.start(opts.task);
   for (let step = 1; ; step++) {
     usage.inputTokens += turn.usage.inputTokens;
@@ -200,7 +231,12 @@ export interface ProjectContext {
  * Builds the grounding context for questions about a project: relevant source chunks (PostgreSQL full-text
  * search over the incremental code index) plus the project's recent history. Every item is cited.
  */
-export async function buildProjectContext(db: Executor, projectId: string, question: string, opts: { filePath?: string; maxChars?: number } = {}): Promise<ProjectContext> {
+export async function buildProjectContext(
+  db: Executor,
+  projectId: string,
+  question: string,
+  opts: { filePath?: string; maxChars?: number; embedding?: SemanticEmbedding } = {},
+): Promise<ProjectContext> {
   const maxChars = opts.maxChars ?? 40_000;
   const citations: AiCitation[] = [];
   const parts: string[] = [];
@@ -208,7 +244,7 @@ export async function buildProjectContext(db: Executor, projectId: string, quest
   if (!project) return { text: '', citations };
   const manifest = (await db.select({ content: projectManifests.content }).from(projectManifests).where(eq(projectManifests.projectId, projectId)).orderBy(desc(projectManifests.version)).limit(1))[0]?.content;
   parts.push(
-    `# Proje\nAd: ${project.name}\nTür: ${project.projectType}\nTeknolojiler: ${project.technologies.join(', ')}\nMüşteri: ${project.customerName}\nVarsayılan branch: ${project.defaultBranch}\nGüncel sürüm: ${project.currentVersion ?? '-'}\nAçıklama: ${project.description}`,
+    `# Proje\nAd: ${project.name}\nTür: ${project.projectType}\nTeknolojiler: ${project.technologies.join(', ')}\nKullanıcı: ${project.customerName}\nVarsayılan branch: ${project.defaultBranch}\nGüncel sürüm: ${project.currentVersion ?? '-'}\nAçıklama: ${project.description}`,
   );
   if (manifest) parts.push(`# projecthub.yml (özet)\n${JSON.stringify(manifest)}`);
 
@@ -226,6 +262,59 @@ export async function buildProjectContext(db: Executor, projectId: string, quest
     for (const c of own) addChunk(c);
   }
   const terms = searchTerms(question + (opts.filePath ? ` ${opts.filePath}` : ''));
+  const memoryRows = terms.length
+    ? (
+        await db.execute<{ id: string; category: string; title: string; content: string; verification: string; source_label: string | null }>(sql`
+          SELECT id, category, title, content, verification, source_label
+          FROM ai_memories
+          WHERE project_id = ${projectId}
+            AND search_vector @@ to_tsquery('simple', ${terms.map((t) => `${t.replace(/[^\p{L}\p{N}_]/gu, '')}:*`).filter((t) => t.length > 2).join(' | ')})
+          ORDER BY CASE verification WHEN 'verified' THEN 0 WHEN 'inferred' THEN 1 ELSE 2 END,
+                   ts_rank_cd(search_vector, to_tsquery('simple', ${terms.map((t) => `${t.replace(/[^\p{L}\p{N}_]/gu, '')}:*`).filter((t) => t.length > 2).join(' | ')})) DESC,
+                   updated_at DESC
+          LIMIT 8`)
+      ).rows
+    : await db.select({ id: aiMemories.id, category: aiMemories.category, title: aiMemories.title, content: aiMemories.content, verification: aiMemories.verification, source_label: aiMemories.sourceLabel }).from(aiMemories).where(eq(aiMemories.projectId, projectId)).orderBy(desc(aiMemories.updatedAt)).limit(5);
+  if (memoryRows.length) {
+    parts.push(`# Proje hafızası\n${memoryRows.map((m) => `- [Hafıza: ${m.title}] [${m.verification}/${m.category}] ${m.content.slice(0, 1200)}${m.source_label ? ` (Kaynak/provenans: ${m.source_label})` : ''}`).join('\n')}`);
+    for (const m of memoryRows) citations.push({ type: 'memory', ref: m.id, label: `Hafıza: ${m.title}` });
+  }
+  const relevantRows: { path: string; start_line: number; end_line: number; content: string }[] = [];
+  const seenChunks = new Set<string>();
+  if (opts.embedding) {
+    try {
+      const [vector] = await opts.embedding.embed([`${question}${opts.filePath ? ` ${opts.filePath}` : ''}`]);
+      if (vector?.length) {
+        // Drizzle expands JavaScript arrays as SQL tuples; pass PostgreSQL's text array form as one bound value.
+        const vectorLiteral = `{${vector.join(',')}}`;
+        const semantic = await db.execute<{ path: string; start_line: number; end_line: number; content: string; similarity: number }>(sql`
+          WITH ranked AS (
+            SELECT path, start_line, end_line, content,
+              (SELECT sum(pair.e::double precision * pair.q::double precision) /
+                nullif(sqrt(sum(pair.e::double precision * pair.e::double precision)) * sqrt(sum(pair.q::double precision * pair.q::double precision)), 0)
+               FROM unnest(embedding, ${vectorLiteral}::real[]) AS pair(e, q)) AS similarity
+            FROM code_chunks
+            WHERE project_id = ${projectId}
+              AND embedding_model = ${opts.embedding.model}
+              AND cardinality(embedding) = ${vector.length}
+          )
+          SELECT path, start_line, end_line, content, similarity
+          FROM ranked WHERE similarity >= 0.15
+          ORDER BY similarity DESC
+          LIMIT 8`);
+        for (const row of semantic.rows) {
+          const key = `${row.path}:${row.start_line}`;
+          if (!seenChunks.has(key)) {
+            seenChunks.add(key);
+            relevantRows.push(row);
+          }
+        }
+      }
+    } catch (error) {
+      // Embeddings are an optional local enhancement; keyword/structural retrieval must remain available.
+      if (process.env.NODE_ENV === 'test') throw error;
+    }
+  }
   if (terms.length) {
     const query = terms.map((t) => `${t.replace(/[^\p{L}\p{N}_]/gu, '')}:*`).filter((t) => t.length > 2).join(' | ');
     const rows = await db.execute<{ path: string; start_line: number; end_line: number; content: string }>(sql`
@@ -234,11 +323,18 @@ export async function buildProjectContext(db: Executor, projectId: string, quest
       WHERE project_id = ${projectId} AND search_vector @@ to_tsquery('simple', ${query})
       ORDER BY ts_rank_cd(search_vector, to_tsquery('simple', ${query})) DESC
       LIMIT 10`);
-    if (rows.rows.length) parts.push('# İlgili kaynak kod');
     for (const r of rows.rows) {
-      if (opts.filePath && r.path === opts.filePath) continue;
-      addChunk({ path: r.path, startLine: r.start_line, endLine: r.end_line, content: r.content });
+      const key = `${r.path}:${r.start_line}`;
+      if (!seenChunks.has(key)) {
+        seenChunks.add(key);
+        relevantRows.push(r);
+      }
     }
+  }
+  if (relevantRows.length) parts.push('# İlgili kaynak kod (semantik + anahtar kelime)');
+  for (const r of relevantRows.slice(0, 12)) {
+    if (opts.filePath && r.path === opts.filePath) continue;
+    addChunk({ path: r.path, startLine: r.start_line, endLine: r.end_line, content: r.content });
   }
 
   const recentBuilds = await db.select().from(builds).where(eq(builds.projectId, projectId)).orderBy(desc(builds.createdAt)).limit(5);
@@ -260,7 +356,7 @@ export async function buildProjectContext(db: Executor, projectId: string, quest
   }
   const openFb = await db.select().from(feedback).where(and(eq(feedback.projectId, projectId), inArray(feedback.status, OPEN_FEEDBACK_STATUSES))).orderBy(desc(feedback.createdAt)).limit(10);
   if (openFb.length) {
-    parts.push(`# Açık müşteri geri bildirimleri\n${openFb.map((f) => `- FB-${f.number} [${f.status}/${f.priority}] ${f.title} — ${f.pageUrl}${f.domSelector ? ` (${f.domSelector})` : ''}: ${f.body.slice(0, 200)}`).join('\n')}`);
+    parts.push(`# Açık kullanıcı geri bildirimleri\n${openFb.map((f) => `- FB-${f.number} [${f.status}/${f.priority}] ${f.title} — ${f.pageUrl}${f.domSelector ? ` (${f.domSelector})` : ''}: ${f.body.slice(0, 200)}`).join('\n')}`);
     for (const f of openFb) citations.push({ type: 'feedback', ref: f.id, label: `FB-${f.number}` });
   }
   const findings = await db.select().from(securityFindings).where(and(eq(securityFindings.projectId, projectId), eq(securityFindings.status, 'open'))).orderBy(desc(securityFindings.createdAt)).limit(10);

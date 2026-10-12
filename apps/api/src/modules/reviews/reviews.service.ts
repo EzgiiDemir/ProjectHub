@@ -16,6 +16,7 @@ import {
   sha256,
   timeline,
   type Actor,
+  retainPreviewArtifact,
 } from '@projecthub/core';
 import { artifacts, builds, feedback, previews, reviewMessages, reviewSessions, reviewVisitors, users, type Executor } from '@projecthub/database';
 import { Ctx, type AuthInfo } from '../../infra/context.js';
@@ -85,7 +86,7 @@ export class ReviewsService {
     const scope = await this.access.requireWritable(auth, idOrSlug, 'review.create');
     const pv = (await this.ctx.db.select().from(previews).where(and(eq(previews.id, input.previewId), eq(previews.projectId, scope.project.id))))[0];
     if (!pv) throw notFound('Ön izleme');
-    if (pv.status !== 'ready') throw precondition('Müşteri linki yalnızca hazır (çalışan) bir ön izleme için oluşturulabilir');
+    if (pv.status !== 'ready') throw precondition('Kullanıcı linki yalnızca hazır (çalışan) bir ön izleme için oluşturulabilir');
     const expiresAt = input.expiresAt ? new Date(input.expiresAt) : new Date(Date.now() + input.expiresInMinutes! * 60_000);
     if (expiresAt.getTime() <= Date.now() + 5 * 60_000) throw precondition('Bitiş zamanı en az 5 dakika sonrası olmalı');
     const build = (await this.ctx.db.select().from(builds).where(eq(builds.id, pv.buildId)))[0];
@@ -119,7 +120,7 @@ export class ReviewsService {
         projectId: scope.project.id,
         kind: 'review',
         tone: 'run',
-        title: `Müşteri linki oluşturuldu: RV-${number}`,
+        title: `Kullanıcı linki oluşturuldu: RV-${number}`,
         description: `${r.name} · ${expiresAt.toLocaleString('tr-TR')} tarihine kadar`,
         refType: 'review',
         refId: r.id,
@@ -134,13 +135,13 @@ export class ReviewsService {
   /** The preview (and its artifact) must live at least as long as the review link. */
   private async keepPreviewAlive(tx: Executor, previewId: string, buildId: string, until: Date) {
     await tx.update(previews).set({ expiresAt: until }).where(and(eq(previews.id, previewId), lt(previews.expiresAt, until)));
-    const b = (await tx.select({ a: builds.artifactId }).from(builds).where(eq(builds.id, buildId)))[0];
-    if (b?.a) await tx.update(artifacts).set({ retentionUntil: until }).where(and(eq(artifacts.id, b.a), lt(artifacts.retentionUntil, until)));
+    const b = (await tx.select({ a: builds.artifactId, org: builds.organizationId }).from(builds).where(eq(builds.id, buildId)))[0];
+    if (b?.a) await retainPreviewArtifact(tx, b.org, b.a, until);
   }
 
   private async load(auth: AuthInfo, reviewId: string) {
     const r = (await this.ctx.db.select().from(reviewSessions).where(and(eq(reviewSessions.id, reviewId), eq(reviewSessions.organizationId, auth.organizationId))))[0];
-    if (!r) throw notFound('Müşteri linki');
+    if (!r) throw notFound('Kullanıcı linki');
     const scope = await this.access.require(auth, r.projectId);
     return { r, scope };
   }
@@ -161,7 +162,7 @@ export class ReviewsService {
     if (r.revokedAt) return this.present(r, true);
     const row = (await this.ctx.db.update(reviewSessions).set({ revokedAt: new Date(), revokedBy: auth.user.id }).where(eq(reviewSessions.id, r.id)).returning())[0]!;
     await audit(this.ctx.db, { organizationId: auth.organizationId, projectId: r.projectId, actor, action: 'review.revoked', resourceType: 'review', resourceId: r.id });
-    await timeline(this.ctx.db, { organizationId: auth.organizationId, projectId: r.projectId, kind: 'review', title: `Müşteri linki kapatıldı: RV-${r.number}`, actorLabel: actor.label, refType: 'review', refId: r.id });
+    await timeline(this.ctx.db, { organizationId: auth.organizationId, projectId: r.projectId, kind: 'review', title: `Kullanıcı linki kapatıldı: RV-${r.number}`, actorLabel: actor.label, refType: 'review', refId: r.id });
     await publish(this.ctx.db, { type: 'review.updated', organizationId: auth.organizationId, projectId: r.projectId, id: r.id, data: { reviewSessionId: r.id } });
     return this.present(row, true);
   }
@@ -192,7 +193,7 @@ export class ReviewsService {
       await tx.update(reviewSessions).set({ previewId: pv.id, versionLabel: label }).where(eq(reviewSessions.id, r.id));
       await this.keepPreviewAlive(tx, pv.id, pv.buildId, r.expiresAt);
       await audit(tx, { organizationId: auth.organizationId, projectId: r.projectId, actor, action: 'review.preview_switched', resourceType: 'review', resourceId: r.id, metadata: { previewId } });
-      await timeline(tx, { organizationId: auth.organizationId, projectId: r.projectId, kind: 'review', tone: 'run', title: `RV-${r.number}: müşteriye yeni sürüm sunuldu`, description: label, actorLabel: actor.label, refType: 'review', refId: r.id });
+      await timeline(tx, { organizationId: auth.organizationId, projectId: r.projectId, kind: 'review', tone: 'run', title: `RV-${r.number}: kullanıcıya yeni sürüm sunuldu`, description: label, actorLabel: actor.label, refType: 'review', refId: r.id });
       await publish(tx, { type: 'review.updated', organizationId: auth.organizationId, projectId: r.projectId, id: r.id, data: { reviewSessionId: r.id, newVersion: true } });
     });
     return this.get(auth, reviewId);
@@ -227,7 +228,7 @@ export class ReviewsService {
   async reply(auth: AuthInfo, reviewId: string, body: string, actor: Actor) {
     const { r, scope } = await this.load(auth, reviewId);
     if (!scope.can('review.create') && !scope.can('feedback.manage')) throw forbidden();
-    if (reviewStatus(r) !== 'active') throw precondition('Bağlantı aktif değil; müşteri mesajı göremez');
+    if (reviewStatus(r) !== 'active') throw precondition('Bağlantı aktif değil; kullanıcı mesajı göremez');
     await this.ctx.db.insert(reviewMessages).values({ reviewSessionId: r.id, authorType: 'user', userId: auth.user.id, body });
     await audit(this.ctx.db, { organizationId: auth.organizationId, projectId: r.projectId, actor, action: 'review.message_sent', resourceType: 'review', resourceId: r.id });
     await publish(this.ctx.db, { type: 'review.message', organizationId: auth.organizationId, projectId: r.projectId, id: r.id, data: { reviewSessionId: r.id } });

@@ -47,6 +47,10 @@ export class Storage {
   backupKey(projectId: string, name: string): string {
     return `backups/${projectId}/${name}`;
   }
+  /** Generated documents (user guide and presentation PDFs). */
+  reportKey(projectId: string, name: string): string {
+    return `artifacts/${projectId}/reports/${name}`;
+  }
   uploadKey(uploadId: string): string {
     return `uploads/${uploadId}`;
   }
@@ -125,10 +129,91 @@ export async function walkFiles(dir: string, skip: (rel: string, isDir: boolean)
   return out.sort();
 }
 
+/**
+ * Copies a directory tree (build workspace → artifact, artifact → deployment workspace).
+ *
+ * Links are recreated by us instead of `fs.cp`: Turbopack externalises server packages through links such as
+ * `.next/node_modules/pg-<hash>` (a relative symlink on Linux, an absolute junction on Windows). `fs.cp` either
+ * resolves them to absolute paths into `src` — which break as soon as the temporary build workspace is deleted —
+ * or fails with EPERM on Windows without the symlink privilege. A link that points inside `src` is re-pointed at the
+ * same place inside `dest`; links pointing elsewhere are kept as written.
+ */
 export async function copyDir(src: string, dest: string, filter?: (rel: string) => boolean): Promise<void> {
-  await fs.cp(src, dest, {
+  const root = path.resolve(src);
+  const links: string[] = [];
+  await fs.cp(root, dest, {
     recursive: true,
     force: true,
-    filter: filter ? (s) => filter(path.relative(src, s).replace(/\\/g, '/')) : undefined,
+    verbatimSymlinks: true,
+    filter: async (s) => {
+      const rel = path.relative(root, s).replace(/\\/g, '/');
+      if (rel && filter && !filter(rel)) return false;
+      if (rel && (await fs.lstat(s)).isSymbolicLink()) {
+        links.push(rel);
+        return false;
+      }
+      return true;
+    },
   });
+  for (const rel of links) await copyLink(root, path.resolve(dest), rel);
+}
+
+/**
+ * Moves a directory tree (build workspace → artifact). A rename keeps link targets as written, so links that pointed
+ * inside the old location (Windows junctions are always absolute) are re-pointed at the new one. Falls back to a copy
+ * when the rename is not possible (e.g. across volumes).
+ */
+export async function moveDir(src: string, dest: string): Promise<void> {
+  const from = path.resolve(src);
+  const to = path.resolve(dest);
+  try {
+    await fs.rename(from, to);
+  } catch {
+    await copyDir(from, to);
+    return;
+  }
+  await relinkMoved(from, to);
+}
+
+/** After a tree was renamed from `oldRoot` to `newRoot`, re-points links that still point into `oldRoot`. */
+export async function relinkMoved(oldRoot: string, newRoot: string): Promise<void> {
+  const from = path.resolve(oldRoot);
+  const to = path.resolve(newRoot);
+  const stack = [to];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    for (const e of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const p = path.join(dir, e.name);
+      if (e.isSymbolicLink()) {
+        const absolute = path.resolve(dir, (await fs.readlink(p)).replace(/^\\\\\?\\/, ''));
+        const inside = path.relative(from, absolute);
+        if (!inside.startsWith('..') && !path.isAbsolute(inside)) await writeLink(p, path.join(to, inside), to);
+      } else if (e.isDirectory()) stack.push(p);
+    }
+  }
+}
+
+async function copyLink(srcRoot: string, destRoot: string, rel: string): Promise<void> {
+  const from = path.join(srcRoot, rel);
+  const raw = (await fs.readlink(from)).replace(/^\\\\\?\\/, '');
+  const absolute = path.resolve(path.dirname(from), raw);
+  const inside = path.relative(srcRoot, absolute);
+  const internal = !inside.startsWith('..') && !path.isAbsolute(inside);
+  await writeLink(path.join(destRoot, rel), internal ? path.join(destRoot, inside) : absolute, internal ? destRoot : null, internal ? null : raw);
+}
+
+/**
+ * (Re)creates the link `at` → `target`. Windows: junctions (no privilege needed, always absolute) for directories,
+ * a copy for files. POSIX: links inside `tree` stay relative so the tree remains valid wherever it is moved.
+ */
+async function writeLink(at: string, target: string, tree: string | null, verbatim: string | null = null): Promise<void> {
+  const isDir = (await fs.stat(target).catch(() => null))?.isDirectory() ?? false;
+  await fs.mkdir(path.dirname(at), { recursive: true });
+  await fs.rm(at, { force: true, recursive: false }).catch(() => undefined);
+  if (process.platform === 'win32') {
+    if (isDir) await fs.symlink(target, at, 'junction');
+    else if (await fs.stat(target).catch(() => null)) await fs.copyFile(target, at);
+    return;
+  }
+  await fs.symlink(verbatim ?? (tree ? path.relative(path.dirname(at), target) : target), at);
 }

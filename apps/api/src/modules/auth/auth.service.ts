@@ -41,10 +41,26 @@ export class AuthService {
     if (!user || !ok) {
       if (user) {
         const failed = user.failedLoginCount + 1;
+        const locked = failed >= MAX_FAILED_LOGINS;
         await db
           .update(users)
-          .set({ failedLoginCount: failed, lockedUntil: failed >= MAX_FAILED_LOGINS ? new Date(Date.now() + LOCK_MINUTES * 60_000) : null })
+          .set({ failedLoginCount: failed, lockedUntil: locked ? new Date(Date.now() + LOCK_MINUTES * 60_000) : null })
           .where(eq(users.id, user.id));
+        // Security trail: every organization the account belongs to sees attempts against it.
+        const orgs = await db.select({ id: organizationMembers.organizationId }).from(organizationMembers).where(eq(organizationMembers.userId, user.id));
+        for (const o of orgs) {
+          await audit(db, {
+            organizationId: o.id,
+            actor: { type: 'user', id: user.id, label: `${user.email} (doğrulanmadı)`, ip: meta.ip, userAgent: meta.userAgent },
+            action: locked ? 'auth.account_locked' : 'auth.login_failed',
+            resourceType: 'user',
+            resourceId: user.id,
+            metadata: { failedAttempts: failed },
+          });
+        }
+      } else {
+        // Unknown accounts belong to no organization; keep the signal in the operational log.
+        this.ctx.logger.warn({ ip: meta.ip }, 'login attempt for unknown account');
       }
       throw fail;
     }
@@ -218,6 +234,21 @@ export class AuthService {
   async updateProfile(auth: AuthInfo, input: { displayName?: string; title?: string }) {
     const row = (await this.ctx.db.update(users).set(input).where(eq(users.id, auth.user.id)).returning())[0]!;
     return pickUser(row);
+  }
+
+  async notificationPreferences(auth: AuthInfo) {
+    const row = (await this.ctx.db.select({ prefs: users.notificationPreferences }).from(users).where(eq(users.id, auth.user.id)))[0];
+    return { preferences: row?.prefs ?? {}, emailEnabled: !!this.ctx.config.SMTP_HOST };
+  }
+
+  /** Read by the worker's notification dispatcher for every event (in-app defaults to on, e-mail to the event's rule). */
+  async setNotificationPreferences(auth: AuthInfo, prefs: Partial<Record<string, { inApp?: boolean; email?: boolean }>>) {
+    const clean: Record<string, { inApp?: boolean; email?: boolean }> = {};
+    for (const [k, v] of Object.entries(prefs)) {
+      if (v && (v.inApp !== undefined || v.email !== undefined)) clean[k] = { ...(v.inApp !== undefined ? { inApp: v.inApp } : {}), ...(v.email !== undefined ? { email: v.email } : {}) };
+    }
+    await this.ctx.db.update(users).set({ notificationPreferences: clean }).where(eq(users.id, auth.user.id));
+    return this.notificationPreferences(auth);
   }
 
   async listSessions(auth: AuthInfo) {

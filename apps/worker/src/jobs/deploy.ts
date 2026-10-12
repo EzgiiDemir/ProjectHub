@@ -20,8 +20,10 @@ import {
   SYSTEM_ACTOR,
   timeline,
   type JobContext,
+  missingRequiredEnv,
 } from '@projecthub/core';
 import {
+  aiRemediations,
   artifacts,
   backups,
   builds,
@@ -40,7 +42,8 @@ import {
 } from '@projecthub/database';
 import { loadProject, type WorkerCtx } from '../context.js';
 import { createAdapter, type ReleaseRef } from '../deploy/adapters.js';
-import { BuildLog, runCommand, sanitizedEnv } from '../runner/process.js';
+import { recordMigrationRuns, verifyBackupFile } from './database.js';
+import { BuildLog, runCommand, runtimeEnv, sanitizedEnv } from '../runner/process.js';
 import { registerPeriodic } from './maintenance.js';
 
 type StepKey = 'policy' | 'artifact' | 'prepare' | 'backup' | 'migrate' | 'deploy' | 'post' | 'health' | 'smoke' | 'finalize';
@@ -59,7 +62,7 @@ const STEPS: [StepKey, string][] = [
 
 class StepFailed extends Error {}
 
-async function databaseUrl(ctx: WorkerCtx, environmentId: string): Promise<{ url: string; conn: typeof databaseConnections.$inferSelect } | null> {
+export async function databaseUrl(ctx: WorkerCtx, environmentId: string): Promise<{ url: string; conn: typeof databaseConnections.$inferSelect } | null> {
   const conn = (await ctx.db.select().from(databaseConnections).where(eq(databaseConnections.environmentId, environmentId)))[0];
   if (!conn) return null;
   const password = conn.passwordSecretId ? await readSecret(ctx.db, ctx.config.encryptionKey, conn.passwordSecretId) : '';
@@ -68,7 +71,7 @@ async function databaseUrl(ctx: WorkerCtx, environmentId: string): Promise<{ url
 }
 
 /** pg_dump in custom format into STORAGE_DIR/backups (spec §31, §53). */
-async function dumpDatabase(ctx: WorkerCtx, input: { organizationId: string; projectId: string; environmentId: string; deploymentId: string | null; versionLabel: string | null; createdBy: string | null }, log: (l: string) => void) {
+export async function dumpDatabase(ctx: WorkerCtx, input: { organizationId: string; projectId: string; environmentId: string; deploymentId: string | null; versionLabel: string | null; createdBy: string | null }, log: (l: string) => void) {
   const db = await databaseUrl(ctx, input.environmentId);
   if (!db) return null;
   const password = db.conn.passwordSecretId ? await readSecret(ctx.db, ctx.config.encryptionKey, db.conn.passwordSecretId) : '';
@@ -94,12 +97,15 @@ async function dumpDatabase(ctx: WorkerCtx, input: { organizationId: string; pro
     throw new Error(`Veritabanı yedeği alınamadı: ${result.stderr.trim().slice(0, 300)}`);
   }
   const buf = await fs.readFile(ctx.storage.resolve(key));
-  await ctx.db.update(backups).set({ status: 'completed', location: key, sizeBytes: buf.length, checksum: sha256(buf), verifiedAt: new Date() }).where(eq(backups.id, row.id));
+  await ctx.db.update(backups).set({ status: 'completed', location: key, sizeBytes: buf.length, checksum: sha256(buf) }).where(eq(backups.id, row.id));
+  // A backup only counts as verified once pg_restore can read its table of contents.
+  const check = await verifyBackupFile(ctx, row.id);
+  log(check.ok ? `Yedek doğrulandı: ${check.message}` : `Uyarı: yedek doğrulanamadı — ${check.message}`);
   log(`Yedek alındı: ${(buf.length / 1024 / 1024).toFixed(2)} MB · ${row.id}`);
   return row.id;
 }
 
-async function httpCheck(url: string, timeoutMs = 10_000): Promise<{ ok: boolean; status: number | null; ms: number; error?: string }> {
+export async function httpCheck(url: string, timeoutMs = 10_000): Promise<{ ok: boolean; status: number | null; ms: number; error?: string }> {
   const started = Date.now();
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow', headers: { 'user-agent': 'ProjectHub-HealthCheck/1.0' } });
@@ -115,6 +121,7 @@ export async function executeDeployment(ctx: WorkerCtx, { job, logger }: JobCont
   const db = ctx.db;
   const d = (await db.select().from(deployments).where(eq(deployments.id, deploymentId)))[0];
   if (!d) throw new PermanentJobError('deployment not found');
+  if (d.status === 'running') return interruptedDeployment(ctx, d);
   if (d.status !== 'queued') return { skipped: d.status };
   const project = await loadProject(ctx, d.projectId);
   const env = (await db.select().from(environments).where(eq(environments.id, d.environmentId)))[0]!;
@@ -201,7 +208,10 @@ export async function executeDeployment(ctx: WorkerCtx, { job, logger }: JobCont
       await fs.rm(workspace, { recursive: true, force: true });
       await copyDir(src, workspace, (rel) => !rel.split('/').some((seg) => exclude.has(seg)) && !/(^|\/)\.env$/.test(rel));
       const files = await fs.readdir(workspace, { recursive: true });
-      return `${source} → ${files.length} öğe (hariç: ${[...exclude].join(', ')})`;
+      const known = await resolveEnvSecrets(db, ctx.config.encryptionKey, { organizationId: d.organizationId, projectId: project.id, environmentId: env.id, scope: 'runtime' });
+      const missing = missingRequiredEnv(m, known);
+      if (missing.length) log.line(`Uyarı: manifestte zorunlu olan ${missing.join(', ')} için ${env.name} ortamında secret yok; değer sunucuda tanımlı değilse uygulama başlamayabilir.`);
+      return `${source} → ${files.length} öğe (hariç: ${[...exclude].join(', ')})${missing.length ? ` · eksik zorunlu değişken: ${missing.join(', ')}` : ''}`;
     });
 
     if (d.backup) {
@@ -222,13 +232,15 @@ export async function executeDeployment(ctx: WorkerCtx, { job, logger }: JobCont
         const r = await runCommand({
           command: migrateCmd,
           cwd: artifactDir,
-          env: sanitizedEnv({ ...secrets, ...(dbUrl ? { DATABASE_URL: dbUrl.url } : {}) }),
+          env: sanitizedEnv({ ...runtimeEnv((manifest as Manifest | null)?.runtime?.type), ...secrets, ...(dbUrl ? { DATABASE_URL: dbUrl.url } : {}) }),
           timeoutMs: 15 * 60_000,
           onOutput: (t) => log.write(t),
         });
         log.flush();
         if (r.exitCode !== 0) throw new Error(`Migration başarısız (çıkış kodu ${r.exitCode}). Uygulama yayına alınmadı; yedekten geri dönüş mümkün.`);
-        return `${v.migrations.length} migration uygulandı\n${migrationsSummary}`;
+        // The migrations are in the database now, even if a later step fails — record them per environment.
+        const recorded = await recordMigrationRuns(db, { projectId: project.id, environmentId: env.id, deploymentId: d.id, versionId: v.id });
+        return `${v.migrations.length} yeni migration bu sürümde · ${recorded} migration bu ortamda uygulandı olarak kaydedildi\n${migrationsSummary}`;
       });
     } else await skip('migrate', !migrateCmd ? `Manifestte migrate komutu yok. ${migrationsSummary}` : 'Migration çalıştırma kapatıldı');
 
@@ -422,6 +434,10 @@ registerPeriodic({
       await ctx.db.update(environments).set({ status, consecutiveFailures: failures, lastHealthAt: new Date() }).where(eq(environments.id, env.id));
       const open = (await ctx.db.select().from(incidents).where(and(eq(incidents.environmentId, env.id), eq(incidents.status, 'open'), eq(incidents.source, 'monitor'))))[0];
       if (failures === 3 && !open) {
+        const selfHealing = (await getOrgSettings(ctx.db, env.organizationId)).ai.selfHealing;
+        const recentRemediations = selfHealing.enabled && !selfHealing.emergencyStop && selfHealing.autoRecheckHealth
+          ? (await ctx.db.select({ n: count() }).from(aiRemediations).where(and(eq(aiRemediations.organizationId, env.organizationId), sql`${aiRemediations.createdAt} >= now() - interval '1 hour'`)))[0]?.n ?? 0
+          : selfHealing.maxAttemptsPerHour;
         await ctx.db.transaction(async (tx) => {
           const number = await nextNumber(tx, env.organizationId, 'incident');
           const inc = (
@@ -432,6 +448,16 @@ registerPeriodic({
           )[0]!;
           await timeline(tx, { organizationId: env.organizationId, projectId: env.projectId, kind: 'incident', tone: 'bad', title: `INC-${number} açıldı: ${inc.title}`, refType: 'incident', refId: inc.id });
           await emitDomainEvent(tx, { event: 'incident.opened', organizationId: env.organizationId, projectId: env.projectId, data: { incidentId: inc.id, title: inc.title } });
+          if (selfHealing.enabled && !selfHealing.emergencyStop && selfHealing.autoRecheckHealth && recentRemediations < selfHealing.maxAttemptsPerHour) {
+            const remediation = (
+              await tx
+                .insert(aiRemediations)
+                .values({ organizationId: env.organizationId, projectId: env.projectId, incidentId: inc.id, action: 'recheck_health', riskLevel: 'low', trigger: 'automatic', diagnosis: 'Üç ardışık izleme hatasından sonra değişiklik yapmadan HTTP sağlık kontrolünü tekrar çalıştır.', attempt: 1 })
+                .returning({ id: aiRemediations.id })
+            )[0]!;
+            await enqueue(tx, { queue: QUEUES.ai, type: 'ai.remediation.run', organizationId: env.organizationId, projectId: env.projectId, maxAttempts: 1, dedupeKey: `remediation:${remediation.id}`, payload: { remediationId: remediation.id } });
+            await audit(tx, { organizationId: env.organizationId, projectId: env.projectId, actor: SYSTEM_ACTOR, action: 'ai.remediation.auto_requested', resourceType: 'ai_remediation', resourceId: remediation.id, metadata: { incidentId: inc.id, action: 'recheck_health', risk: 'low' } });
+          }
         });
       } else if (r.ok && open) {
         await ctx.db.transaction(async (tx) => {
@@ -453,6 +479,11 @@ registerPeriodic({
   everyMinutes: 60,
   run: async (ctx) => {
     const now = new Date();
+    // Rows left "running" by a job whose worker died for good (no job left to finish them) are closed here,
+    // so screens never spin forever. Thresholds are far above any legitimate run time.
+    await ctx.db.execute(sql`UPDATE backups SET status = 'failed', error = 'Yedekleme yarıda kaldı (worker kesintisi)' WHERE status = 'running' AND created_at < now() - interval '3 hours'`);
+    await ctx.db.execute(sql`UPDATE security_scans SET status = 'failed', error = 'Tarama yarıda kaldı (worker kesintisi)', finished_at = now() WHERE status IN ('queued', 'running') AND created_at < now() - interval '3 hours' AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.type = 'security.scan' AND j.status IN ('queued', 'running') AND j.payload->>'scanId' = security_scans.id::text)`);
+    await ctx.db.execute(sql`UPDATE responsive_tests SET status = 'failed', error = 'Test yarıda kaldı (worker kesintisi)', finished_at = now() WHERE status IN ('queued', 'running') AND created_at < now() - interval '3 hours' AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.type = 'responsive.test' AND j.status IN ('queued', 'running') AND j.payload->>'testId' = responsive_tests.id::text)`);
     const live = await ctx.db.select({ buildId: previews.buildId }).from(previews).where(inArray(previews.status, ['queued', 'starting', 'ready']));
     const keepBuilds = new Set(live.map((l) => l.buildId));
     const expired = await ctx.db.select().from(artifacts).where(lt(artifacts.retentionUntil, now)).limit(500);
@@ -503,3 +534,37 @@ registerPeriodic({
     return removed;
   },
 });
+
+/**
+ * The worker stopped or crashed while this deployment was running (its job was re-queued or its lease expired).
+ * Resuming blindly is unsafe — the worker cannot know whether the release swap happened — so the deployment is
+ * failed with an explanation and, when the target may have been touched, an incident asks a human to verify it.
+ */
+async function interruptedDeployment(ctx: WorkerCtx, d: typeof deployments.$inferSelect) {
+  const db = ctx.db;
+  const steps = await db.select().from(deploymentSteps).where(eq(deploymentSteps.deploymentId, d.id));
+  const inFlight = steps.find((s) => s.status === 'running');
+  const touched = steps.some((s) => s.key === 'deploy' && (s.status === 'running' || s.status === 'passed'));
+  const env = (await db.select().from(environments).where(eq(environments.id, d.environmentId)))[0]!;
+  const message = `Deployment, worker yeniden başladığı için ${inFlight ? `"${inFlight.name}" adımında` : ''} yarıda kaldı. ${touched ? 'Hedef sunucu değişmiş olabilir; canlı sürümü kontrol edin, gerekirse önceki sürüme dönün.' : 'Hedefte değişiklik yapılmadı; yeniden deploy edebilirsiniz.'}`;
+  await db.transaction(async (tx) => {
+    if (inFlight) await tx.update(deploymentSteps).set({ status: 'failed', output: 'Worker kesintisi', finishedAt: new Date() }).where(eq(deploymentSteps.id, inFlight.id));
+    await tx.update(deploymentSteps).set({ status: 'skipped' }).where(and(eq(deploymentSteps.deploymentId, d.id), eq(deploymentSteps.status, 'pending')));
+    await tx.update(deployments).set({ status: 'failed', error: message, finishedAt: new Date() }).where(eq(deployments.id, d.id));
+    await audit(tx, { organizationId: d.organizationId, projectId: d.projectId, actor: SYSTEM_ACTOR, action: 'deployment.interrupted', resourceType: 'deployment', resourceId: d.id, metadata: { step: inFlight?.key ?? null, targetTouched: touched } });
+    await timeline(tx, { organizationId: d.organizationId, projectId: d.projectId, kind: 'deploy', tone: 'bad', title: `D-${d.number} yarıda kaldı (${env.name})`, description: message, refType: 'deployment', refId: d.id });
+    await emitDomainEvent(tx, { event: 'deployment.failed', organizationId: d.organizationId, projectId: d.projectId, data: { deploymentId: d.id, environment: env.name, requestedBy: d.requestedBy, error: message } });
+    if (touched) {
+      const number = await nextNumber(tx, d.organizationId, 'incident');
+      const inc = (
+        await tx
+          .insert(incidents)
+          .values({ organizationId: d.organizationId, projectId: d.projectId, environmentId: env.id, number, title: `D-${d.number} yarıda kaldı: ${env.name} kontrol edilmeli`, severity: env.type === 'production' ? 'high' : 'medium', source: 'deployment' })
+          .returning()
+      )[0]!;
+      await emitDomainEvent(tx, { event: 'incident.opened', organizationId: d.organizationId, projectId: d.projectId, data: { incidentId: inc.id, title: inc.title } });
+    }
+    await publish(tx, { type: 'deployment.updated', organizationId: d.organizationId, projectId: d.projectId, id: d.id });
+  });
+  return { status: 'interrupted', targetTouched: touched };
+}

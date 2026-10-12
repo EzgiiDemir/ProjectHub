@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Put, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import {
@@ -8,6 +8,7 @@ import {
   loginSchema,
   requestPasswordResetSchema,
   resetPasswordSchema,
+  notificationPreferencesSchema,
   updateProfileSchema,
 } from '@projecthub/contracts';
 import type { Actor } from '@projecthub/core';
@@ -125,6 +126,17 @@ export class AuthController {
   @Patch('profile')
   profile(@Auth() a: AuthInfo, @Body() body: unknown) {
     return this.auth.updateProfile(a, parse(updateProfileSchema, body));
+  }
+
+  @Get('notification-preferences')
+  notificationPreferences(@Auth() a: AuthInfo) {
+    return this.auth.notificationPreferences(a);
+  }
+
+  /** Replaces the user's preferences (categories left out fall back to the defaults). */
+  @Put('notification-preferences')
+  setNotificationPreferences(@Auth() a: AuthInfo, @Body() body: unknown) {
+    return this.auth.setNotificationPreferences(a, parse(notificationPreferencesSchema, body));
   }
 
   @Get('sessions')

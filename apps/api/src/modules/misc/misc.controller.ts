@@ -94,6 +94,11 @@ export class MiscController {
     return this.svc.draftPostmortem(a, assertUuid(incidentId, 'Olay'));
   }
 
+  @Post('incidents/:incidentId/remediations')
+  remediation(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Param('incidentId') incidentId: string) {
+    return this.svc.requestRemediation(a, assertUuid(incidentId, 'Olay'), actor);
+  }
+
   @Get('projects/:id/environments/:envId/health-checks')
   health(@Auth() a: AuthInfo, @Param('id') id: string, @Param('envId') envId: string) {
     return this.svc.healthChecks(a, id, assertUuid(envId, 'Ortam'));

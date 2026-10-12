@@ -29,7 +29,7 @@ export default function TimelinePage() {
       <div className="spread" style={{ marginBottom: 6 }}>
         <div>
           <h2 style={{ margin: 0 }}>Zaman akışı</h2>
-          <p className="sub">Kod, build, müşteri, AI ve deployment olaylarının tek kronolojisi.</p>
+          <p className="sub">Kod, build, kullanıcı, AI ve deployment olaylarının tek kronolojisi.</p>
         </div>
       </div>
       <div className="row" style={{ marginBottom: 8 }}>

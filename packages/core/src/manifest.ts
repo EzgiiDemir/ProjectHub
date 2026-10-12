@@ -116,6 +116,7 @@ export async function detectProject(src: FileSource, fallbackName: string): Prom
     if (pkg.version) r.version = pkg.version;
     if (pkg.description) r.description = pkg.description;
     r.runtime = { type: 'node', version: (/\d+/.exec(pkg.engines?.node ?? '') ?? ['22'])[0] };
+    tech.push('Node.js');
     const pm = set.has('pnpm-lock.yaml') || pkg.packageManager?.startsWith('pnpm')
       ? 'pnpm'
       : set.has('yarn.lock') || pkg.packageManager?.startsWith('yarn')
@@ -182,7 +183,7 @@ export async function detectProject(src: FileSource, fallbackName: string): Prom
     r.installCommand = 'composer install --no-dev --optimize-autoloader';
     if (/laravel\/framework/.test(composer)) {
       tech.push('Laravel');
-      r.startCommand = 'php artisan serve --host=0.0.0.0 --port=$PORT';
+      r.startCommand = 'php artisan serve --host=127.0.0.1 --port=$PORT';
       r.port = 8000;
       r.migrateCommand = 'php artisan migrate --force';
       r.migrationDirectory = 'database/migrations';
@@ -206,26 +207,27 @@ export async function detectProject(src: FileSource, fallbackName: string): Prom
     tech.push('Python');
     r.runtime = { type: 'python', version: '3.13' };
     r.packageManager = 'pip';
-    r.installCommand = find('requirements.txt') ? 'pip install -r requirements.txt' : 'pip install .';
+    // Per-project dependency folder (the hub puts .pydeps on PYTHONPATH); never the worker's global site-packages.
+    r.installCommand = find('requirements.txt') ? 'python -m pip install --target .pydeps -r requirements.txt' : 'python -m pip install --target .pydeps .';
     if (/fastapi/i.test(req)) {
       tech.push('FastAPI');
-      r.startCommand = 'uvicorn main:app --host 0.0.0.0 --port $PORT';
+      r.startCommand = 'python -m uvicorn main:app --host 127.0.0.1 --port $PORT';
       r.projectType = 'API servisi';
     } else if (/django/i.test(req)) {
       tech.push('Django');
-      r.startCommand = 'python manage.py runserver 0.0.0.0:$PORT';
+      r.startCommand = 'python manage.py runserver 127.0.0.1:$PORT';
       r.migrateCommand = 'python manage.py migrate --noinput';
       r.projectType = 'Web uygulaması';
     } else if (/flask/i.test(req)) {
       tech.push('Flask');
-      r.startCommand = 'flask run --host 0.0.0.0 --port $PORT';
+      r.startCommand = 'python -m flask run --host 127.0.0.1 --port $PORT';
       r.projectType = 'API servisi';
     }
     if (/alembic/i.test(req)) {
-      r.migrateCommand = 'alembic upgrade head';
+      r.migrateCommand = 'python -m alembic upgrade head';
       r.migrationDirectory = 'alembic/versions';
     }
-    if (/pytest/i.test(req) || paths.some((p) => /(^|\/)tests?\/.*\.py$/.test(p))) r.testCommand = 'pytest';
+    if (/pytest/i.test(req) || paths.some((p) => /(^|\/)tests?\/.*\.py$/.test(p))) r.testCommand = 'python -m pytest -q';
     r.port = 8000;
     if (r.startCommand) r.previewMode = 'process';
   }
@@ -338,6 +340,11 @@ export async function detectProject(src: FileSource, fallbackName: string): Prom
       if (m) {
         r.name = m.project.name;
         r.version = m.project.version;
+        // The manifest is authoritative for what code alone cannot reveal (e.g. raw SQL migrations + DATABASE_URL).
+        if (r.database === 'none' && m.database.type !== 'none') {
+          r.database = m.database.type;
+          checks.push(`Veritabanı (manifest): ${m.database.type === 'postgresql' ? 'PostgreSQL' : m.database.type}`);
+        }
       }
     } catch (e) {
       warnings.push(`projecthub.yml geçersiz: ${(e as Error).message}`);

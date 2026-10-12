@@ -15,8 +15,9 @@ export class AnthropicProvider implements AiProvider {
   constructor(
     apiKey: string,
     readonly model: string = DEFAULT_ANTHROPIC_MODEL,
+    baseURL?: string,
   ) {
-    this.client = new Anthropic({ apiKey, maxRetries: 3 });
+    this.client = new Anthropic({ apiKey, maxRetries: 3, ...(baseURL ? { baseURL } : {}) });
   }
 
   private baseParams() {
@@ -89,6 +90,8 @@ export class AnthropicProvider implements AiProvider {
         return turn();
       },
       continue: async (results: AiToolResult[]) => {
+        // pause_turn: the assistant turn is resumed as-is, without a user message.
+        if (!results.length) return turn();
         // All results of one assistant turn go back in a single user message.
         messages.push({
           role: 'user',

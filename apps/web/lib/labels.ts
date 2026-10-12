@@ -30,7 +30,7 @@ const L: Record<string, [string, Tone]> = {
   triaged: ['İncelendi', 'run'],
   planned: ['Planlandı', 'run'],
   in_progress: ['Üzerinde çalışılıyor', 'run'],
-  ready_for_review: ['Müşteri onayında', 'amber'],
+  ready_for_review: ['Kullanıcı onayında', 'amber'],
   resolved: ['Çözüldü', 'ok'],
   rejected: ['Reddedildi', 'idle'],
   // tasks
@@ -85,7 +85,7 @@ export const EVENT_KIND: Record<string, [string, string]> = {
   commit: ['Commit', 'var(--idle)'],
   build: ['Build', 'var(--run)'],
   preview: ['Ön izleme', 'var(--run)'],
-  review: ['Müşteri linki', 'var(--primary)'],
+  review: ['Kullanıcı linki', 'var(--primary)'],
   feedback: ['Feedback', 'var(--amber)'],
   task: ['Görev', 'var(--primary)'],
   ai: ['AI', '#7a3ea8'],
@@ -95,6 +95,6 @@ export const EVENT_KIND: Record<string, [string, string]> = {
   incident: ['Olay', 'var(--bad)'],
   docs: ['Doküman', 'var(--muted)'],
 };
-export const DEPARTMENTS = ['Pazarlama', 'Bilgi İşlem', 'E-Ticaret Operasyon', 'Müşteri Hizmetleri', 'Satış', 'Finans', 'Hukuk', 'Yönetim', 'Tasarım', 'Diğer'];
+export const DEPARTMENTS = ['Pazarlama', 'Bilgi İşlem', 'E-Ticaret Operasyon', 'Kullanıcı Hizmetleri', 'Satış', 'Finans', 'Hukuk', 'Yönetim', 'Tasarım', 'Diğer'];
 /** AI autonomy levels (spec: L0 off … L3 tries its change in a preview); production is never AI-deployed. */
 export const AI_LEVEL: Record<string, string> = { L0: 'Kapalı', L1: 'Okur ve açıklar', L2: 'Değişiklik hazırlar, onay ister', L3: 'Değişikliği ön izlemede kendisi dener, onay ister' };

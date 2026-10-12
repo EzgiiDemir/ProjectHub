@@ -146,6 +146,18 @@ export class AdminController {
     return this.system.updateAi(a, parse(aiSettingsSchema, body), actor);
   }
 
+  @Get('ai/usage')
+  @RequirePermission('admin.settings.manage')
+  aiUsage(@Auth() a: AuthInfo) {
+    return this.system.aiUsage(a);
+  }
+
+  @Get('ai/operations')
+  @RequirePermission('admin.settings.manage')
+  aiOperations(@Auth() a: AuthInfo) {
+    return this.system.aiOperations(a);
+  }
+
   @Put('settings/retention')
   @RequirePermission('admin.settings.manage')
   updateRetention(@Auth() a: AuthInfo, @CurrentActor() actor: Actor, @Body() body: unknown) {
@@ -155,7 +167,7 @@ export class AdminController {
   /* system */
   @Get('system')
   @RequirePermission('admin.system.read')
-  status() {
+  status(): Promise<unknown> {
     return this.system.systemStatus();
   }
 

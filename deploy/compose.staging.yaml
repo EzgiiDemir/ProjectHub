@@ -1,0 +1,56 @@
+# Local staging override: the production stack on one workstation, without a public domain.
+#
+#   docker compose -f deploy/compose.yaml -f deploy/compose.staging.yaml --env-file <staging.env> up -d --build
+#
+# Differences from production (everything else — images, networks, volumes, health checks — is the real stack):
+#   - Traefik listens on 127.0.0.1:8443 only (https, Traefik's self-signed default certificate, no ACME).
+#   - The bundled Ollama service is disabled (profile `bundled-ollama`); api/worker use the host's Ollama through
+#     host.docker.internal. Remove that override to test the bundled service (multi-GB image + model download).
+#   - The project name is `projecthub-staging`, so volumes never collide with a production stack on the same engine.
+# staging.env needs: PH_DOMAIN=localhost, PH_DOMAIN_REGEX=localhost, POSTGRES_PASSWORD, APP_ENCRYPTION_KEY,
+# ACME_EMAIL=staging@localhost, ACME_DNS_PROVIDER=none.
+
+name: projecthub-staging
+
+x-staging-env: &staging-env
+  APP_URL: https://localhost:8443
+  REVIEW_BASE_URL: https://localhost:8443/r
+  PREVIEW_PUBLIC_URL_TEMPLATE: https://{slug}.preview.localhost:8443
+  OLLAMA_BASE_URL: ${STAGING_OLLAMA_URL:-http://host.docker.internal:11434}
+
+services:
+  ollama:
+    profiles: [bundled-ollama]
+
+  api:
+    environment: *staging-env
+    extra_hosts: ['host.docker.internal:host-gateway']
+
+  worker:
+    environment: *staging-env
+
+  traefik:
+    command: !override
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=projecthub-staging_frontend
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=15m
+      # Resolvers exist so the production router labels stay valid; issuance fails fast (unreachable CA) and
+      # Traefik serves its self-signed default certificate.
+      - --certificatesresolvers.le.acme.email=staging@localhost
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      - --certificatesresolvers.le.acme.caserver=https://127.0.0.1:9/directory
+      - --certificatesresolvers.le-dns.acme.email=staging@localhost
+      - --certificatesresolvers.le-dns.acme.storage=/letsencrypt/acme-dns.json
+      - --certificatesresolvers.le-dns.acme.tlschallenge=true
+      - --certificatesresolvers.le-dns.acme.caserver=https://127.0.0.1:9/directory
+    ports: !override
+      - '127.0.0.1:8443:443'
+
+networks:
+  frontend:
+    name: projecthub-staging_frontend

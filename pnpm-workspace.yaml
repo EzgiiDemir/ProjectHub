@@ -3,8 +3,14 @@ packages:
   - packages/*
 
 allowBuilds:
+  # Local development database (pnpm db:start); not part of production images.
+  '@embedded-postgres/darwin-arm64': true
+  '@embedded-postgres/darwin-x64': true
+  '@embedded-postgres/linux-arm64': true
+  '@embedded-postgres/linux-x64': true
   '@embedded-postgres/windows-x64': true
   cpu-features: false
+  dtrace-provider: false
   esbuild: true
   ssh2: false
 

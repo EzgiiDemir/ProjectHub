@@ -9,8 +9,9 @@ export class OpenAiProvider implements AiProvider {
   constructor(
     apiKey: string,
     readonly model: string,
+    baseURL?: string,
   ) {
-    this.client = new OpenAI({ apiKey, maxRetries: 3 });
+    this.client = new OpenAI({ apiKey, maxRetries: 3, ...(baseURL ? { baseURL } : {}) });
   }
 
   async complete(opts: { system: string; messages: ChatMessage[]; maxTokens?: number; onText?: (delta: string) => void; signal?: AbortSignal }) {

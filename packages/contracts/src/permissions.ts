@@ -14,8 +14,8 @@ export const PERMISSIONS = {
   'build.create': { group: 'Build', label: 'Build başlatma' },
   'preview.create': { group: 'Ön izleme', label: 'Ön izleme ve cihaz testi oluşturma' },
   'preview.delete': { group: 'Ön izleme', label: 'Ön izlemeyi durdurma' },
-  'review.create': { group: 'Müşteri', label: 'Müşteri linki oluşturma / kapatma' },
-  'feedback.manage': { group: 'Müşteri', label: 'Feedback ve görev yönetimi' },
+  'review.create': { group: 'Kullanıcı', label: 'Kullanıcı linki oluşturma / kapatma' },
+  'feedback.manage': { group: 'Kullanıcı', label: 'Feedback ve görev yönetimi' },
   'version.create': { group: 'Yayın', label: 'Versiyon oluşturma' },
   'environment.manage': { group: 'Yayın', label: 'Ortam ve deployment hedefi yönetimi' },
   'deployment.staging': { group: 'Yayın', label: 'Staging / development deployment' },
@@ -78,7 +78,7 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
   {
     key: 'project_manager',
     name: 'Proje Yöneticisi',
-    description: 'Projeleri, müşteri süreçlerini ve yayınları yönetir.',
+    description: 'Projeleri, kullanıcı süreçlerini ve yayınları yönetir.',
     permissions: [
       'project.read',
       'project.create',
@@ -136,7 +136,7 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
   {
     key: 'designer',
     name: 'Designer',
-    description: 'Ön izlemeleri inceler, müşteri linki paylaşır.',
+    description: 'Ön izlemeleri inceler, kullanıcı linki paylaşır.',
     permissions: ['project.read', 'repository.read', 'preview.create', 'review.create', 'feedback.manage'],
   },
   {

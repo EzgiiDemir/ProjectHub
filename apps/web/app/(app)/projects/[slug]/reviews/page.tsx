@@ -12,13 +12,14 @@ import { useProject, useProjectSlug } from '@/lib/hooks';
 import type { Feedback, Preview, Review } from '@/lib/types';
 import { Async, ConfirmDialog, CopyButton, Drawer, Empty, Field, KeyValue, Panel, StatusBadge, Tabs } from '@/components/ui';
 import { useToast } from '@/components/toast';
+import { LogoInput } from '@/components/logo-input';
 
 const CAPS: [keyof ReviewCapabilities, string, string][] = [
   ['feedback', 'Geri bildirim', 'Sayfada nokta seçip yorum, hata veya değişiklik talebi bırakabilir'],
   ['screenshots', 'Ekran görüntüsü', 'Geri bildirimle birlikte o anki ekranın görüntüsü otomatik alınır'],
   ['deviceSwitch', 'Cihaz değiştirme', 'Telefon, tablet ve masaüstü boyutlarında görüntüleyebilir'],
   ['chat', 'Ekiple yazışma', 'Proje ekibine mesaj gönderebilir'],
-  ['docs', 'Dokümanlar', 'Sürüm notlarını ve README dosyasını görebilir'],
+  ['docs', 'Dokümanlar', 'Proje açıklamasını ve sürüm notlarını görebilir'],
 ];
 
 /** Customer review links (spec §54–60): time-limited, revocable access to a preview, without an account. */
@@ -37,12 +38,12 @@ export default function ReviewsPage() {
     <>
       <div className="spread" style={{ marginBottom: 12 }}>
         <div>
-          <h2 style={{ margin: 0 }}>Müşteri linkleri</h2>
-          <p className="sub">Müşteri hesap açmadan ön izlemeyi görür, sayfa üzerinde geri bildirim bırakır. Linkler süreli ve her an kapatılabilir.</p>
+          <h2 style={{ margin: 0 }}>Kullanıcı linkleri</h2>
+          <p className="sub">Kullanıcı hesap açmadan ön izlemeyi görür, sayfa üzerinde geri bildirim bırakır. Linkler süreli ve her an kapatılabilir.</p>
         </div>
         {canCreate && (
           <button className="btn pri" onClick={() => router.replace(`${base}?new=1`)}>
-            <Plus /> Yeni müşteri linki
+            <Plus /> Yeni kullanıcı linki
           </button>
         )}
       </div>
@@ -85,12 +86,13 @@ export default function ReviewsPage() {
               </div>
             </Panel>
           ) : (
-            <Empty title="Müşteri linki yok" action={canCreate && <button className="btn pri" onClick={() => router.replace(`${base}?new=1`)}>İlk linki oluştur</button>}>
-              Çalışan bir ön izlemeyi müşteriyle paylaşmak için link oluşturun.
+            <Empty title="Kullanıcı linki yok" action={canCreate && <button className="btn pri" onClick={() => router.replace(`${base}?new=1`)}>İlk linki oluştur</button>}>
+              Çalışan bir ön izlemeyi kullanıcıyla paylaşmak için link oluşturun.
             </Empty>
           )
         }
       </Async>
+      <PortalBranding slug={slug} />
       {creating && canCreate && <CreateReview slug={slug} initialPreview={params.get('preview')} onClose={() => router.replace(base)} onCreated={(id) => router.replace(`${base}?open=${id}`)} />}
       {openId && <ReviewDrawer id={openId} slug={slug} onClose={() => router.replace(base)} />}
     </>
@@ -104,7 +106,7 @@ function CreateReview({ slug, initialPreview, onClose, onCreated }: { slug: stri
   const previews = useQuery({ queryKey: ['previews', slug], queryFn: () => api<Preview[]>(`/projects/${slug}/previews`) });
   const ready = (previews.data ?? []).filter((p) => p.status === 'ready');
   const [previewId, setPreviewId] = useState(initialPreview ?? '');
-  const [name, setName] = useState(project ? `${project.name} müşteri incelemesi` : '');
+  const [name, setName] = useState(project ? `${project.name} kullanıcı incelemesi` : '');
   const [expiry, setExpiry] = useState('10080');
   const [password, setPassword] = useState('');
   const [caps, setCaps] = useState<ReviewCapabilities>({ feedback: true, screenshots: true, deviceSwitch: true, chat: true, docs: true });
@@ -112,7 +114,7 @@ function CreateReview({ slug, initialPreview, onClose, onCreated }: { slug: stri
   const create = useMutation({
     mutationFn: () => api<Review>(`/projects/${slug}/reviews`, { method: 'POST', body: { previewId: selected, name, expiresInMinutes: Number(expiry), password: password || undefined, capabilities: caps } }),
     onSuccess: (r) => {
-      toast('Müşteri linki oluşturuldu');
+      toast('Kullanıcı linki oluşturuldu');
       void qc.invalidateQueries({ queryKey: ['reviews'] });
       onCreated(r.id);
     },
@@ -122,7 +124,7 @@ function CreateReview({ slug, initialPreview, onClose, onCreated }: { slug: stri
   const outlives = pv && new Date(pv.expiresAt).getTime() < Date.now() + reviewMinutes * 60_000;
   return (
     <Drawer
-      title="Yeni müşteri linki"
+      title="Yeni kullanıcı linki"
       onClose={onClose}
       footer={
         <>
@@ -139,7 +141,7 @@ function CreateReview({ slug, initialPreview, onClose, onCreated }: { slug: stri
         <span className="spinner" />
       ) : !ready.length ? (
         <Empty title="Çalışan ön izleme yok" action={<Link className="btn" href={`/projects/${slug}/previews`}>Ön izleme oluştur</Link>}>
-          Müşteri linki çalışan bir ön izlemeye bağlanır.
+          Kullanıcı linki çalışan bir ön izlemeye bağlanır.
         </Empty>
       ) : (
         <>
@@ -152,7 +154,7 @@ function CreateReview({ slug, initialPreview, onClose, onCreated }: { slug: stri
               ))}
             </select>
           </Field>
-          <Field label="Link adı" id="rv-name" hint="Müşterinin göreceği başlık">
+          <Field label="Link adı" id="rv-name" hint="Kullanıcının göreceği başlık">
             <input id="rv-name" className="in" value={name} onChange={(e) => setName(e.target.value)} maxLength={150} />
           </Field>
           <Field label="Geçerlilik" id="rv-exp">
@@ -165,11 +167,11 @@ function CreateReview({ slug, initialPreview, onClose, onCreated }: { slug: stri
             </select>
           </Field>
           {outlives && <div className="warnbox" style={{ marginTop: -4, marginBottom: 12 }}>Ön izlemenin süresi linkten önce doluyor; ön izleme, link geçerli olduğu sürece otomatik uzatılır.</div>}
-          <Field label="Şifre (isteğe bağlı)" id="rv-pw" hint="En az 6 karakter. Müşteriye ayrı bir kanaldan iletin." error={password && password.length < 6 ? 'En az 6 karakter' : null}>
+          <Field label="Şifre (isteğe bağlı)" id="rv-pw" hint="En az 6 karakter. Kullanıcıya ayrı bir kanaldan iletin." error={password && password.length < 6 ? 'En az 6 karakter' : null}>
             <input id="rv-pw" className="in" type="text" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="off" />
           </Field>
           <div className="field">
-            <label>Müşteri neler yapabilir?</label>
+            <label>Kullanıcı neler yapabilir?</label>
             {CAPS.map(([k, label, hint]) => (
               <label key={k} className="check" style={{ alignItems: 'flex-start' }}>
                 <input type="checkbox" checked={caps[k]} onChange={(e) => setCaps((c) => ({ ...c, [k]: e.target.checked }))} disabled={k === 'screenshots' && !caps.feedback} />
@@ -203,7 +205,7 @@ function ReviewDrawer({ id, slug, onClose }: { id: string; slug: string; onClose
   const switchPv = useMutation({ mutationFn: (previewId: string) => api(`/reviews/${id}/switch-preview`, { method: 'POST', body: { previewId } }), onSuccess: () => (toast('Link yeni ön izlemeye bağlandı'), refresh()), onError: (e) => toast(errorMessage(e), 'bad') });
 
   return (
-    <Drawer title={q.data ? `${q.data.key} · ${q.data.name}` : 'Müşteri linki'} onClose={onClose} wide>
+    <Drawer title={q.data ? `${q.data.key} · ${q.data.name}` : 'Kullanıcı linki'} onClose={onClose} wide>
       <Async q={q}>
         {(r) => {
           const active = r.status === 'active';
@@ -213,7 +215,7 @@ function ReviewDrawer({ id, slug, onClose }: { id: string; slug: string; onClose
               {r.url && active && (
                 <div className="okbox" style={{ marginBottom: 14 }}>
                   <div className="small" style={{ marginBottom: 6 }}>
-                    Bu linki müşteriye gönderin{r.passwordProtected ? ' (şifreyi ayrı bir kanaldan iletin)' : ''}:
+                    Bu linki kullanıcıya gönderin{r.passwordProtected ? ' (şifreyi ayrı bir kanaldan iletin)' : ''}:
                   </div>
                   <div className="row" style={{ flexWrap: 'nowrap' }}>
                     <code className="small ellipsis" style={{ flex: 1 }}>
@@ -307,8 +309,8 @@ function ReviewDrawer({ id, slug, onClose }: { id: string; slug: string; onClose
               {tab === 'feedback' && <ReviewFeedback slug={slug} reviewId={r.id} />}
               {revoking && (
                 <ConfirmDialog
-                  title="Müşteri linkini kapat"
-                  message="Link hemen geçersiz olur; müşteri ön izlemeyi ve geri bildirim ekranını açamaz. Gelen geri bildirimler korunur."
+                  title="Kullanıcı linkini kapat"
+                  message="Link hemen geçersiz olur; kullanıcı ön izlemeyi ve geri bildirim ekranını açamaz. Gelen geri bildirimler korunur."
                   actionLabel="Kapat"
                   busy={revoke.isPending}
                   onConfirm={() => revoke.mutate()}
@@ -337,7 +339,9 @@ function ReviewChat({ id, active }: { id: string; active: boolean }) {
       setText('');
     },
   });
-  useEffect(() => end.current?.scrollIntoView({ block: 'end' }), [q.data]);
+  useEffect(() => {
+    void end.current?.scrollIntoView({ block: 'end' });
+  }, [q.data]);
   return (
     <div className="panel flush" style={{ display: 'flex', flexDirection: 'column', height: 460 }}>
       <div className="chat">
@@ -364,7 +368,7 @@ function ReviewChat({ id, active }: { id: string; active: boolean }) {
             if (text.trim()) send.mutate();
           }}
         >
-          <input className="in" value={text} onChange={(e) => setText(e.target.value)} placeholder="Müşteriye yanıt yazın…" maxLength={4000} />
+          <input className="in" value={text} onChange={(e) => setText(e.target.value)} placeholder="Kullanıcıya yanıt yazın…" maxLength={4000} />
           <button className="btn pri" disabled={!text.trim() || send.isPending}>
             <Send />
           </button>
@@ -402,5 +406,79 @@ function ReviewFeedback({ slug, reviewId }: { slug: string; reviewId: string }) 
         )
       }
     </Async>
+  );
+}
+
+interface Branding {
+  logo: string | null;
+  customerLogo: string | null;
+  accent: string | null;
+  companyLogo: string | null;
+  canEdit: boolean;
+  canEditCompany: boolean;
+}
+type BrandingDraft = Pick<Branding, 'logo' | 'customerLogo' | 'accent' | 'companyLogo'>;
+
+/** How the customer portal looks (spec §141): project and customer logos and an accent colour. */
+function PortalBranding({ slug }: { slug: string }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const q = useQuery({ queryKey: ['branding', slug], queryFn: () => api<Branding>(`/projects/${slug}/branding`) });
+  const [draft, setDraft] = useState<BrandingDraft | null>(null);
+  const save = useMutation({
+    mutationFn: async ({ companyLogo, ...b }: BrandingDraft) => {
+      // The company logo is organisation-wide; only system administrators change it.
+      if (q.data?.canEditCompany && companyLogo !== q.data.companyLogo) await api('/organization/branding', { method: 'PUT', body: { logo: companyLogo } });
+      return q.data?.canEdit ? api<Branding>(`/projects/${slug}/branding`, { method: 'PUT', body: b }) : api<Branding>(`/projects/${slug}/branding`);
+    },
+    onSuccess: (b) => {
+      qc.setQueryData(['branding', slug], b);
+      setDraft(null);
+      toast('Portal görünümü kaydedildi');
+    },
+    onError: (e) => toast(errorMessage(e), 'bad'),
+  });
+  return (
+    <Panel title="Portal görünümü" className="mt">
+      <Async q={q} rows={2}>
+        {(b) => {
+          const v = draft ?? { logo: b.logo, customerLogo: b.customerLogo, accent: b.accent, companyLogo: b.companyLogo };
+          const set = (patch: Partial<typeof v>) => setDraft({ ...v, ...patch });
+          return (
+            <>
+              <p className="small muted" style={{ marginTop: 0 }}>
+                Kullanıcının gördüğü sayfada şirket logosu, proje logosu, kullanıcı logosu ve vurgu rengi kullanılır. Şirket logosu tüm projelerde ortaktır ve yalnızca sistem yöneticileri tarafından değiştirilebilir.
+              </p>
+              <div className="grid g4">
+                <LogoInput label="Şirket logosu" value={v.companyLogo} disabled={!b.canEditCompany} onChange={(companyLogo) => set({ companyLogo })} />
+                <LogoInput label="Proje logosu" value={v.logo} disabled={!b.canEdit} onChange={(logo) => set({ logo })} />
+                <LogoInput label="Kullanıcı logosu" value={v.customerLogo} disabled={!b.canEdit} onChange={(customerLogo) => set({ customerLogo })} />
+                <Field label="Vurgu rengi" id="pb-accent" hint="Boş bırakılırsa varsayılan renk kullanılır.">
+                  <div className="row" style={{ gap: 8 }}>
+                    <input id="pb-accent" type="color" value={v.accent ?? '#1f4e8c'} disabled={!b.canEdit} onChange={(e) => set({ accent: e.target.value })} style={{ width: 48, height: 34, padding: 2 }} />
+                    <span className="mono small">{v.accent ?? 'varsayılan'}</span>
+                    {v.accent && b.canEdit && (
+                      <button type="button" className="btn sm" onClick={() => set({ accent: null })}>
+                        Sıfırla
+                      </button>
+                    )}
+                  </div>
+                </Field>
+              </div>
+              {(b.canEdit || b.canEditCompany) && draft && (
+                <div className="row" style={{ marginTop: 6 }}>
+                  <button className="btn" onClick={() => setDraft(null)}>
+                    Vazgeç
+                  </button>
+                  <button className="btn pri" disabled={save.isPending} onClick={() => save.mutate(draft)}>
+                    Kaydet
+                  </button>
+                </div>
+              )}
+            </>
+          );
+        }}
+      </Async>
+    </Panel>
   );
 }

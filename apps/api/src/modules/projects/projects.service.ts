@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { and, count, desc, eq, inArray, isNull, lt, ne, or, sql, type SQL } from 'drizzle-orm';
-import { OPEN_FEEDBACK_STATUSES, type Manifest, type ProjectStatus } from '@projecthub/contracts';
+import { OPEN_FEEDBACK_STATUSES, type Manifest, type ProjectStatus, type ProjectTemplateId } from '@projecthub/contracts';
 import {
   audit,
   conflict,
@@ -31,6 +31,7 @@ import {
   projectMembers,
   projects,
   repositories,
+  reviewSessions,
   roles,
   securityScans,
   teams,
@@ -54,7 +55,7 @@ type CreateInput = {
   teamId: string | null;
   color?: string;
   defaultBranch: string;
-  source: { type: 'empty' } | { type: 'git'; url: string; branch?: string; accessToken?: string } | { type: 'upload'; uploadId: string };
+  source: { type: 'empty'; template?: ProjectTemplateId } | { type: 'git'; url: string; branch?: string; accessToken?: string } | { type: 'upload'; uploadId: string };
   createDefaultEnvironments: boolean;
 };
 
@@ -165,6 +166,7 @@ export class ProjectsService {
             ownerId: auth.user.id,
             createdBy: auth.user.id,
             sourceLabel,
+            settings: { executionTrust: input.source.type === 'empty' ? 'trusted' : 'untrusted' },
           })
           .returning()
       )[0]!;
@@ -210,6 +212,7 @@ export class ProjectsService {
           projectId: p.id,
           source: input.source.type,
           branch: input.source.type === 'git' ? (input.source.branch ?? null) : null,
+          template: input.source.type === 'empty' ? (input.source.template ?? null) : null,
           uploadId: upload?.id ?? null,
           requestedBy: auth.user.id,
         },
@@ -268,13 +271,22 @@ export class ProjectsService {
     };
   }
 
-  async update(auth: AuthInfo, idOrSlug: string, input: { name?: string; description?: string; customerName?: string; teamId?: string | null; color?: string; status?: ProjectStatus }, actor: Actor) {
+  async update(
+    auth: AuthInfo,
+    idOrSlug: string,
+    input: { name?: string; description?: string; customerName?: string; teamId?: string | null; color?: string; status?: ProjectStatus; executionTrust?: 'trusted' | 'untrusted' },
+    actor: Actor,
+  ) {
     const scope = await this.access.requireWritable(auth, idOrSlug, 'project.update');
     if (input.teamId) {
       const t = await this.ctx.db.select({ id: teams.id }).from(teams).where(and(eq(teams.id, input.teamId), eq(teams.organizationId, auth.organizationId)));
       if (!t.length) throw notFound('Ekip');
     }
-    const row = (await this.ctx.db.update(projects).set(input).where(eq(projects.id, scope.project.id)).returning())[0]!;
+    const { executionTrust, ...fields } = input;
+    const update = executionTrust
+      ? { ...fields, settings: { ...scope.project.settings, executionTrust } }
+      : fields;
+    const row = (await this.ctx.db.update(projects).set(update).where(eq(projects.id, scope.project.id)).returning())[0]!;
     await audit(this.ctx.db, { organizationId: auth.organizationId, projectId: row.id, actor, action: 'project.updated', resourceType: 'project', resourceId: row.id, metadata: input });
     if (input.status && input.status !== scope.project.status) {
       await timeline(this.ctx.db, { organizationId: auth.organizationId, projectId: row.id, kind: 'project', title: `Proje durumu: ${input.status}`, actorLabel: actor.label });
@@ -293,8 +305,13 @@ export class ProjectsService {
       for (const pv of running) {
         await enqueue(tx, { queue: QUEUES.preview, type: 'preview.stop', projectId: r.id, organizationId: auth.organizationId, payload: { previewId: pv.id, reason: 'archived' } });
       }
+      // Customer links would otherwise stay "active" while pointing at stopped previews.
+      await tx
+        .update(reviewSessions)
+        .set({ revokedAt: new Date(), revokedBy: auth.user.id })
+        .where(and(eq(reviewSessions.projectId, r.id), isNull(reviewSessions.revokedAt), sql`${reviewSessions.expiresAt} > now()`));
       await audit(tx, { organizationId: auth.organizationId, projectId: r.id, actor, action: 'project.archived', resourceType: 'project', resourceId: r.id });
-      await timeline(tx, { organizationId: auth.organizationId, projectId: r.id, kind: 'project', title: 'Proje arşivlendi', description: 'Kod, sürümler ve geçmiş korunur; deployment kapalı.', actorLabel: actor.label });
+      await timeline(tx, { organizationId: auth.organizationId, projectId: r.id, kind: 'project', title: 'Proje arşivlendi', description: 'Kod, sürümler ve geçmiş korunur; ön izlemeler durduruldu, kullanıcı linkleri kapatıldı, deployment kapalı.', actorLabel: actor.label });
       await emitDomainEvent(tx, { event: 'project.archived', organizationId: auth.organizationId, projectId: r.id, actor, data: { name: r.name } });
       return r;
     });

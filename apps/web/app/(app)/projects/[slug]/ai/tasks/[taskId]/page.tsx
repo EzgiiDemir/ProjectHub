@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, X } from 'lucide-react';
+import { Check, OctagonX, X } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useState } from 'react';
@@ -41,6 +41,15 @@ export default function AiTaskPage() {
     },
     onError: (e) => toast(errorMessage(e), 'bad'),
   });
+  const cancel = useMutation({
+    mutationFn: () => api<AiTask>(`/ai/tasks/${taskId}/cancel`, { method: 'POST' }),
+    onSuccess: (t) => {
+      qc.setQueryData(['aiTask', taskId], t);
+      void qc.invalidateQueries({ queryKey: ['aiTasks'] });
+      toast('AI görevi iptal edildi');
+    },
+    onError: (e) => toast(errorMessage(e), 'bad'),
+  });
 
   return (
     <Async q={q} rows={6}>
@@ -60,6 +69,11 @@ export default function AiTaskPage() {
                   {t.requestedByName ?? '—'} · {dateTime(t.createdAt)} · seviye {t.autonomyLevel}
                 </p>
               </div>
+              {working && (
+                <button className="btn danger" onClick={() => cancel.mutate()} disabled={cancel.isPending}>
+                  {cancel.isPending ? <span className="spinner" /> : <OctagonX />} Görevi iptal et
+                </button>
+              )}
               {t.status === 'awaiting_approval' && t.canApprove && (
                 <div className="row">
                   <button className="btn" onClick={() => setDecision('reject')}>

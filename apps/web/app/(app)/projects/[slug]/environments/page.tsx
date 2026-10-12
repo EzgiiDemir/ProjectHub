@@ -90,6 +90,7 @@ export default function EnvironmentsPage() {
           )
         }
       </Async>
+      <DeploymentWindowPanel slug={slug} archived={archived} />
       {editing && <EnvironmentDrawer slug={slug} env={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
       {deploying && <DeployDrawer slug={slug} env={deploying} canOverride={can('security.manage')} onClose={() => setDeploying(null)} />}
     </>
@@ -406,7 +407,6 @@ function DeployDrawer({ slug, env, canOverride, onClose }: { slug: string; env: 
     },
   });
   const policyBlocked = deploy.error instanceof ApiError && deploy.error.code === 'POLICY_DENIED';
-  const risky = selected?.migrations.some((m) => m.risk === 'high');
   return (
     <Drawer
       title={`${env.name} ortamına deploy`}
@@ -440,21 +440,9 @@ function DeployDrawer({ slug, env, canOverride, onClose }: { slug: string; env: 
                 <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
                   <div className="small muted">Sürüm notları</div>
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{selected.releaseNotes || '—'}</div>
-                  {selected.migrations.length > 0 && (
-                    <>
-                      <div className="small muted" style={{ marginTop: 8 }}>
-                        Veritabanı değişiklikleri
-                      </div>
-                      {selected.migrations.map((m) => (
-                        <div key={m.path} className="small">
-                          <StatusBadge status={m.risk} /> <span className="mono">{m.name}</span> {m.operations.join(', ')}
-                        </div>
-                      ))}
-                    </>
-                  )}
                 </div>
               )}
-              {risky && <div className="warnbox small" style={{ marginBottom: 12 }}>Yüksek riskli veritabanı değişikliği var (tablo/kolon silme vb.). Yedek almadan devam etmeyin.</div>}
+              {selected && <Preflight slug={slug} envId={env.id} versionId={selected.id} />}
               <label className="check">
                 <input type="checkbox" checked={backup} onChange={(e) => setBackup(e.target.checked)} /> Öncesinde veritabanı yedeği al (bağlantı tanımlıysa)
               </label>
@@ -492,5 +480,158 @@ function DeployDrawer({ slug, env, canOverride, onClose }: { slug: string; env: 
         }
       </Async>
     </Drawer>
+  );
+}
+
+interface PreflightResult {
+  current: { version: string; commitSha: string } | null;
+  target: { version: string; commitSha: string };
+  pendingMigrations: { path: string; name: string; riskLevel: string; operations: string[]; version: string }[];
+  configChanges: string[];
+  checks: { key: string; status: 'ok' | 'warn' | 'block'; label: string; detail: string }[];
+  blocked: boolean;
+}
+const CHECK_TONE = { ok: 'var(--ok)', warn: 'var(--warn)', block: 'var(--bad)' } as const;
+
+/** "Update analysis" (spec §49): what this deployment changes in this environment and what could stop it. */
+function Preflight({ slug, envId, versionId }: { slug: string; envId: string; versionId: string }) {
+  const q = useQuery({
+    queryKey: ['preflight', slug, envId, versionId],
+    queryFn: () => api<PreflightResult>(`/projects/${slug}/deployments/preflight?environmentId=${envId}&versionId=${versionId}`),
+  });
+  return (
+    <div className="panel" style={{ padding: 12, marginBottom: 12 }} data-testid="preflight">
+      <div className="small muted" style={{ marginBottom: 6 }}>Güncelleme analizi</div>
+      <Async q={q} rows={3}>
+        {(r) => (
+          <>
+            <div className="small" style={{ marginBottom: 8 }}>
+              {r.current ? <>v{r.current.version} → <b>v{r.target.version}</b></> : <>İlk yayın: <b>v{r.target.version}</b></>}
+            </div>
+            {r.checks.map((c) => (
+              <div key={c.key} className="small" style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '2px 0' }}>
+                <span aria-hidden style={{ color: CHECK_TONE[c.status], fontWeight: 700, width: 12 }}>{c.status === 'ok' ? '✓' : c.status === 'warn' ? '!' : '×'}</span>
+                <span>
+                  {c.label}
+                  {c.detail && <span className="muted"> · {c.detail}</span>}
+                </span>
+              </div>
+            ))}
+            {r.pendingMigrations.length > 0 && (
+              <>
+                <div className="small muted" style={{ marginTop: 8 }}>Bu ortamda uygulanacak migration&apos;lar</div>
+                {r.pendingMigrations.map((m) => (
+                  <div key={m.path} className="small">
+                    <StatusBadge status={m.riskLevel} /> <span className="mono">{m.name}</span> <span className="muted">v{m.version}</span> {m.operations.join(', ')}
+                  </div>
+                ))}
+              </>
+            )}
+            {r.pendingMigrations.some((m) => m.riskLevel === 'high') && <div className="warnbox small" style={{ marginTop: 8 }}>Yüksek riskli veritabanı değişikliği var (tablo/kolon silme vb.). Yedek almadan devam etmeyin.</div>}
+            {r.blocked && <div className="badbox small" style={{ marginTop: 8 }}>Engelleyen sorunlar giderilmeden deployment başarısız olur.</div>}
+          </>
+        )}
+      </Async>
+    </div>
+  );
+}
+
+interface DeploymentWindowSetting {
+  enabled: boolean;
+  environmentTypes: string[];
+  days: number[];
+  start: string;
+  end: string;
+  timezone: string;
+  outside: 'require_approval' | 'deny';
+}
+const WEEK = [1, 2, 3, 4, 5, 6, 0].map((d) => [d, ['Paz', 'Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt'][d]!] as const);
+const DEFAULT_WINDOW: DeploymentWindowSetting = { enabled: true, environmentTypes: ['production'], days: [1, 2, 3, 4, 5], start: '09:00', end: '22:00', timezone: 'Europe/Istanbul', outside: 'require_approval' };
+
+/** Deployment window policy (spec §25): outside the allowed hours a deployment needs an approval or is refused. */
+function DeploymentWindowPanel({ slug, archived }: { slug: string; archived: boolean }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const q = useQuery({ queryKey: ['deployment-window', slug], queryFn: () => api<{ window: DeploymentWindowSetting | null; productionNow: 'inside' | 'not_applicable' | 'outside'; canEdit: boolean }>(`/projects/${slug}/deployment-window`) });
+  const [draft, setDraft] = useState<DeploymentWindowSetting | null>(null);
+  const save = useMutation({
+    mutationFn: (w: DeploymentWindowSetting) => api(`/projects/${slug}/deployment-window`, { method: 'PUT', body: w }),
+    onSuccess: () => {
+      toast('Zaman penceresi kaydedildi');
+      setDraft(null);
+      void qc.invalidateQueries({ queryKey: ['deployment-window', slug] });
+      void qc.invalidateQueries({ queryKey: ['preflight'] });
+    },
+    onError: (e) => toast(errorMessage(e), 'bad'),
+  });
+  return (
+    <Panel title="Deployment zaman penceresi" className="mt">
+      <Async q={q} rows={2}>
+        {(r) => {
+          const w = draft ?? r.window ?? { ...DEFAULT_WINDOW, enabled: false };
+          const set = (patch: Partial<DeploymentWindowSetting>) => setDraft({ ...w, ...patch });
+          const editable = r.canEdit && !archived;
+          return (
+            <>
+              <p className="small muted" style={{ marginTop: 0 }}>
+                Seçilen ortamlara yalnızca izinli gün ve saatlerde doğrudan deployment yapılır. Pencere dışında istek onaya düşer veya reddedilir. Geri almalar hiçbir zaman reddedilmez, en fazla onaya düşer.
+                {r.window?.enabled && r.productionNow === 'outside' && <b style={{ color: 'var(--warn)' }}> Şu an production için pencere dışındasınız.</b>}
+              </p>
+              <label className="check">
+                <input type="checkbox" checked={w.enabled} disabled={!editable} onChange={(e) => set({ enabled: e.target.checked })} /> Zaman penceresini uygula
+              </label>
+              {w.enabled && (
+                <div className="grid g2" style={{ marginTop: 8 }}>
+                  <Field label="Günler" id="dw-days">
+                    <div className="row" id="dw-days" style={{ flexWrap: 'wrap', gap: 6 }}>
+                      {WEEK.map(([d, label]) => (
+                        <label key={d} className="check" style={{ margin: 0 }}>
+                          <input type="checkbox" checked={w.days.includes(d)} disabled={!editable} onChange={(e) => set({ days: e.target.checked ? [...w.days, d] : w.days.filter((x) => x !== d) })} /> {label}
+                        </label>
+                      ))}
+                    </div>
+                  </Field>
+                  <Field label="Ortamlar" id="dw-envs">
+                    <div className="row" id="dw-envs" style={{ flexWrap: 'wrap', gap: 6 }}>
+                      {(['production', 'staging', 'development', 'custom'] as const).map((t) => (
+                        <label key={t} className="check" style={{ margin: 0 }}>
+                          <input type="checkbox" checked={w.environmentTypes.includes(t)} disabled={!editable} onChange={(e) => set({ environmentTypes: e.target.checked ? [...w.environmentTypes, t] : w.environmentTypes.filter((x) => x !== t) })} /> {ENV_TYPE[t]}
+                        </label>
+                      ))}
+                    </div>
+                  </Field>
+                  <Field label="İzinli saatler" id="dw-start" hint="Bitiş başlangıçtan önceyse pencere gece yarısını aşar (örn. 22:00–06:00).">
+                    <div className="row" style={{ gap: 6 }}>
+                      <input id="dw-start" className="in" type="time" value={w.start} disabled={!editable} onChange={(e) => set({ start: e.target.value })} style={{ maxWidth: 130 }} />
+                      <span>–</span>
+                      <input className="in" type="time" value={w.end} disabled={!editable} onChange={(e) => set({ end: e.target.value })} style={{ maxWidth: 130 }} aria-label="Bitiş saati" />
+                    </div>
+                  </Field>
+                  <Field label="Saat dilimi" id="dw-tz">
+                    <input id="dw-tz" className="in mono" value={w.timezone} disabled={!editable} onChange={(e) => set({ timezone: e.target.value })} placeholder="Europe/Istanbul" />
+                  </Field>
+                  <Field label="Pencere dışında" id="dw-out">
+                    <select id="dw-out" className="in" value={w.outside} disabled={!editable} onChange={(e) => set({ outside: e.target.value as DeploymentWindowSetting['outside'] })}>
+                      <option value="require_approval">Onay gerekir</option>
+                      <option value="deny">Deployment reddedilir</option>
+                    </select>
+                  </Field>
+                </div>
+              )}
+              {editable && draft && (
+                <div className="row" style={{ marginTop: 10 }}>
+                  <button className="btn" onClick={() => setDraft(null)}>
+                    Vazgeç
+                  </button>
+                  <button className="btn pri" disabled={save.isPending || (draft.enabled && (!draft.days.length || !draft.environmentTypes.length))} onClick={() => save.mutate(draft)}>
+                    Kaydet
+                  </button>
+                </div>
+              )}
+            </>
+          );
+        }}
+      </Async>
+    </Panel>
   );
 }

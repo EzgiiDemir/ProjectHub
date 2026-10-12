@@ -59,6 +59,22 @@ describe('project detection', () => {
     expect(laravel).toMatchObject({ database: 'mysql', migrationDirectory: 'database/migrations', migrateCommand: 'php artisan migrate --force' });
   });
 
+  it('recognises a dependency-free Node app and takes the database from its manifest', async () => {
+    const det = await detectProject(
+      src({
+        'package.json': JSON.stringify({ name: 'shop', scripts: { build: 'node build.mjs', start: 'node server.mjs' }, engines: { node: '>=22' } }),
+        'package-lock.json': '{}',
+        '.env.example': 'DATABASE_URL=\n',
+        'db/migrations/0001_init.sql': 'CREATE TABLE x (id int);',
+        'projecthub.yml': 'project:\n  name: Shop\n  slug: shop\nruntime:\n  type: node\ndatabase:\n  type: postgresql\n',
+      }),
+      'shop',
+    );
+    expect(det.technologies).toContain('Node.js');
+    expect(det.warnings).not.toContain('Teknoloji otomatik tanınamadı. Manifesti elle düzenleyebilirsiniz.');
+    expect(det).toMatchObject({ database: 'postgresql', migrationDirectory: 'db/migrations', hasManifest: true, name: 'Shop' });
+  });
+
   it('slugifies Turkish names', () => {
     expect(slugify('Ödeme Portalı 2024')).toBe('odeme-portali-2024');
     expect(slugify('Saha Servis Uygulaması')).toBe('saha-servis-uygulamasi');
@@ -66,6 +82,24 @@ describe('project detection', () => {
 });
 
 describe('scanners', () => {
+  it('maps architecture relationships, cycles, entry points and test frameworks locally', () => {
+    const report = scan.analyseArchitecture(
+      new Map([
+        ['package.json', JSON.stringify({ devDependencies: { vitest: '^5.0.0' } })],
+        ['src/main.ts', "import { a } from './a';\nexport const main = () => a();"],
+        ['src/a.ts', "import { b } from './b';\nexport const a = () => b();"],
+        ['src/b.ts', "import { a } from './a';\nexport const b = () => a();"],
+        ['src/a.test.ts', "import { a } from './a';\nit('works', () => a());"],
+        ['db/migrations/001.sql', 'create table example(id int);'],
+      ]),
+    );
+    expect(report.entryPoints).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'src/main.ts' })]));
+    expect(report.testFrameworks).toContain('Vitest');
+    expect(report.migrationFiles).toEqual(['db/migrations/001.sql']);
+    expect(report.relationships).toEqual(expect.arrayContaining([{ from: 'src/a.ts', to: 'src/b.ts' }, { from: 'src/b.ts', to: 'src/a.ts' }]));
+    expect(report.circularDependencies.some((cycle) => cycle.includes('src/a.ts') && cycle.includes('src/b.ts'))).toBe(true);
+  });
+
   it('finds secrets but ignores examples and env lookups', () => {
     const f = scan.scanSecrets('src/lib/config.ts', [
       'export const a = "AKIA' + 'ABCDEFGHIJKLMNOP";',

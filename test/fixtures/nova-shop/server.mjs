@@ -33,4 +33,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(port, () => console.log(`Nova Mağaza listening on ${port}`));
+// Bind to HOST when given (Project Hub previews set 127.0.0.1 so only the preview gateway can reach the app).
+const host = process.env.HOST ?? "0.0.0.0";
+server.listen(port, host, () => console.log(`Nova Mağaza listening on ${host}:${port}`));

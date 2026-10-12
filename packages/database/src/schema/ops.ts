@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   check,
   index,
@@ -209,6 +210,43 @@ export const incidents = pgTable(
   ],
 );
 
+/** Policy-scoped remediation attempts. The allow-list currently contains only a non-mutating health recheck. */
+export const aiRemediations = pgTable(
+  'ai_remediations',
+  {
+    id: pk(),
+    organizationId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    projectId: uuid()
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    incidentId: uuid()
+      .notNull()
+      .references(() => incidents.id, { onDelete: 'cascade' }),
+    action: varchar({ length: 40 }).notNull(),
+    riskLevel: varchar({ length: 20 }).notNull().default('low'),
+    trigger: varchar({ length: 20 }).notNull(),
+    status: varchar({ length: 30 }).notNull().default('queued'),
+    diagnosis: text(),
+    result: jsonb().$type<Record<string, unknown> | null>(),
+    attempt: integer().notNull().default(1),
+    requestedBy: uuid().references(() => users.id, { onDelete: 'set null' }),
+    startedAt: ts(),
+    finishedAt: ts(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index('ai_remediations_incident_idx').on(t.incidentId, t.createdAt),
+    index('ai_remediations_rate_idx').on(t.organizationId, t.createdAt),
+    check('ai_remediations_action_ck', oneOf('action', ['recheck_health'])),
+    check('ai_remediations_risk_ck', oneOf('risk_level', ['low'])),
+    check('ai_remediations_trigger_ck', oneOf('trigger', ['manual', 'automatic'])),
+    check('ai_remediations_status_ck', oneOf('status', ['queued', 'running', 'succeeded', 'failed', 'blocked'])),
+  ],
+);
+
 export const healthChecks = pgTable(
   'health_checks',
   {
@@ -235,3 +273,22 @@ export const workerHeartbeats = pgTable('worker_heartbeats', {
   lastSeenAt: ts().notNull().defaultNow(),
   info: jsonb().$type<Record<string, unknown>>().notNull().default({}),
 });
+
+/** Host and queue samples taken by the worker every 5 minutes (infrastructure trends, spec §15, §20). */
+export const systemMetrics = pgTable(
+  'system_metrics',
+  {
+    id: pk(),
+    hostname: varchar({ length: 120 }).notNull(),
+    cpuLoad: integer().notNull(),
+    memoryUsed: bigint({ mode: 'number' }).notNull(),
+    memoryTotal: bigint({ mode: 'number' }).notNull(),
+    diskUsed: bigint({ mode: 'number' }),
+    diskTotal: bigint({ mode: 'number' }),
+    queuedJobs: integer().notNull().default(0),
+    runningJobs: integer().notNull().default(0),
+    runningPreviews: integer().notNull().default(0),
+    recordedAt: createdAt(),
+  },
+  (t) => [index('system_metrics_time_idx').on(t.recordedAt)],
+);
